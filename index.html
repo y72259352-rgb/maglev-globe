@@ -1,0 +1,1472 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>磁悬浮地球仪控制台</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* 布局：三维场景铺满整页，像一件悬浮在深空里的展品。左上是标题、状态和读数；右上是速度、视角等开关；
+   右侧是可收起的参数面板（示波器 + PID）；底部中间是讲解字幕和实验按钮；负反馈环框图按需弹出。
+   整页固定为深色：面板是深色半透明玻璃，强调色取自实物——线圈的紫铜色和磁感线的青蓝色。 */
+:root{
+  --paper:#03050a; --panel:#0d141f; --ink:#e7edf6; --muted:#8e9bb0; --line:#24324a; --grid:#111a27;
+  --copper:#e08a4c; --glow:#ffae63; --steel:#8b98ab; --field:#5aa8ff; --cyan:#62d4ff;
+  --ocean:#2f6fb5; --land:#5c9a55; --brass:#cfa640;
+  --t-x:#86b8ff; --t-i:#f2a06a; --t-v:#46d1bd;
+  --ok:#4ad38c; --warn:#f1b552; --bad:#ff6d6d;
+  --font-ui:"PingFang SC","Microsoft YaHei","Noto Sans SC","Hiragino Sans GB",system-ui,sans-serif;
+  --font-num:"JetBrains Mono","Cascadia Mono",Consolas,"SFMono-Regular",Menlo,monospace;
+  --rp:400px;
+  --gap:14px;
+  --dock-h:120px;      /* 底部字幕 + 按钮的实际高度，由脚本测量后更新 */
+  --edge-l:max(16px,env(safe-area-inset-left,0px));
+  --edge-r:max(16px,env(safe-area-inset-right,0px));
+  --edge-t:calc(14px + env(safe-area-inset-top,0px));
+  --edge-b:calc(14px + env(safe-area-inset-bottom,0px));
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}   /* 带 hidden 属性的元素一律不显示，否则下面的 display 会把它顶出来 */
+html,body{height:100%}
+body{margin:0;overflow:hidden;background:var(--paper);color:var(--ink);font-family:var(--font-ui);font-size:14px;line-height:1.5}
+.panel-closed{--rp:0px}
+.app{position:fixed;inset:0;overflow:hidden;background:radial-gradient(120% 90% at 40% 35%,#0a1222,#03050a 70%)}
+
+/* 场景 */
+.stage3d{position:absolute;inset:0}
+.stage3d canvas.gl{position:absolute;inset:0;width:100%;height:100%;display:block;cursor:grab;touch-action:pan-y}
+.stage3d canvas.gl:active{cursor:grabbing}
+.stage3d canvas.gl:focus{outline:none}
+#stage{position:absolute;left:calc((100% - var(--rp)) / 2);top:calc(50% - 60px);transform:translate(-50%,-50%);display:block}
+
+/* 深色玻璃浮层 */
+.glass{background:linear-gradient(180deg,rgba(22,32,50,.62),rgba(9,14,24,.58));backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);
+  border:1px solid rgba(140,175,230,.16);border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.05)}
+.lowfx .glass{backdrop-filter:none;-webkit-backdrop-filter:none;background:rgba(11,17,28,.92)}
+.hud{position:absolute;z-index:3}
+.eyebrow{margin:0 0 4px;font-family:var(--font-num);font-size:10.5px;letter-spacing:.18em;color:var(--cyan);opacity:.85}
+h1{font-size:20px;line-height:1.25;font-weight:600;letter-spacing:.06em;margin:0;text-wrap:balance}
+.sub{margin:3px 0 0;color:var(--muted);font-size:12.5px}
+h2{font-size:11.5px;font-weight:600;letter-spacing:.14em;color:var(--muted);margin:0 0 8px}
+kbd{font-family:var(--font-num);font-size:10.5px;line-height:1;padding:3px 5px;border:1px solid rgba(140,175,230,.22);border-radius:4px;color:var(--muted)}
+:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+
+/* 左上：标题、状态、读数 */
+.hud-tl{left:var(--edge-l);top:var(--edge-t);width:min(340px,calc(100vw - 32px));padding:14px 16px 12px}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.pill{display:inline-flex;align-items:center;gap:7px;padding:3px 11px;border-radius:999px;font-size:13px;font-weight:600;color:var(--muted);background:rgba(142,155,176,.12)}
+.pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor}
+.pill.ok{color:var(--ok);background:rgba(74,211,140,.12)}
+.pill.warn{color:var(--warn);background:rgba(241,181,82,.13)}
+.pill.bad{color:var(--bad);background:rgba(255,109,109,.13)}
+.readouts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px 10px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(140,175,230,.14)}
+.ro span{display:block;font-size:11.5px;color:var(--muted)}
+.ro output{display:block;font-family:var(--font-num);font-size:16px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.hint{margin:10px 0 0;font-size:11.5px;color:var(--muted)}
+.low-fps{display:block;margin-top:6px;font-size:12px;color:var(--warn)}
+
+/* 右上：开关 */
+.hud-tr{right:var(--edge-r);top:var(--edge-t);display:flex;flex-wrap:wrap;justify-content:flex-end;gap:8px;max-width:calc(100vw - 32px - min(340px,100vw - 32px) - 16px)}
+.seg{display:inline-flex;overflow:hidden;border-radius:10px}
+.seg button{font:inherit;font-size:13px;padding:6px 11px;border:0;border-right:1px solid rgba(140,175,230,.14);background:transparent;color:var(--ink);cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+.seg button:last-child{border-right:0}
+.seg button:hover{background:rgba(255,255,255,.05)}
+.seg button[aria-pressed="true"]{background:rgba(98,212,255,.16);color:var(--cyan)}
+.seg button[aria-pressed="true"] kbd{color:var(--cyan);border-color:rgba(98,212,255,.4)}
+.seg button:disabled{opacity:.4;cursor:not-allowed}
+button.act{font:inherit;font-size:13.5px;padding:7px 12px;border-radius:10px;border:1px solid rgba(140,175,230,.18);background:rgba(255,255,255,.04);color:var(--ink);cursor:pointer;display:inline-flex;gap:7px;align-items:center;white-space:nowrap}
+button.act:hover{border-color:rgba(140,175,230,.42);background:rgba(255,255,255,.07)}
+button.act[aria-pressed="true"]{background:rgba(98,212,255,.16);color:var(--cyan);border-color:rgba(98,212,255,.5)}
+button.act[aria-pressed="true"] kbd{color:var(--cyan);border-color:rgba(98,212,255,.4)}
+button.act.risky[aria-pressed="true"]{background:rgba(255,109,109,.18);color:#ffb7b7;border-color:rgba(255,109,109,.6)}
+button.act.risky[aria-pressed="true"] kbd{color:#ffb7b7;border-color:rgba(255,109,109,.5)}
+
+/* 右侧：参数面板 */
+.hud-right{right:var(--edge-r);top:calc(var(--edge-t) + var(--tr-h,40px) + 12px);bottom:var(--edge-b);width:min(var(--rp),calc(100vw - 32px));padding:14px 16px;overflow-y:auto;overscroll-behavior:contain;
+  display:flex;flex-direction:column;gap:16px;transition:opacity .25s,transform .25s}
+.panel-closed .hud-right{opacity:0;transform:translateX(24px);pointer-events:none;visibility:hidden}
+.hud-right section+section{border-top:1px solid rgba(140,175,230,.14);padding-top:14px}
+.scope-legend{display:flex;flex-wrap:wrap;gap:10px 14px;font-size:12px;color:var(--muted);margin:-2px 0 6px}
+.scope-legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:6px}
+.scope-legend i.dash{height:0;border-top:2px dashed rgba(231,237,246,.85);border-radius:0}
+/* 电路对照：三档开关和状态 */
+.circ-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:0 0 6px}
+.circ-row .seg{border:1px solid rgba(140,175,230,.18)}
+.circ-row .seg button{font-size:12.5px;padding:5px 10px}
+.circ-status{margin:0 0 8px;font-size:12px;color:var(--muted);min-height:1.5em}
+.circ-status.ok{color:var(--ok)}
+.circ-status.warn{color:var(--warn)}
+.circ-status.bad{color:var(--bad)}
+canvas{display:block;max-width:100%}
+#scope,#map{width:100%}
+.knob{display:grid;grid-template-columns:70px minmax(0,1fr) 62px;gap:2px 10px;align-items:center;padding:6px 0}
+.knob+.knob{border-top:1px dashed rgba(140,175,230,.14)}
+.knob label{font-weight:600}
+.knob label small{display:block;font-weight:400;font-size:11px;color:var(--muted)}
+.knob input{width:100%;accent-color:var(--copper)}
+.knob output{font-family:var(--font-num);font-variant-numeric:tabular-nums;text-align:right;font-size:13px}
+.knob .res{grid-column:2 / 4;font-family:var(--font-num);font-size:11.5px;color:var(--muted)}
+.map-cap{font-size:11.5px;color:var(--muted);margin:6px 0 0}
+.poles{font-family:var(--font-num);font-size:12px;margin:4px 0 0;font-variant-numeric:tabular-nums}
+
+/* 底部：讲解字幕 + 实验按钮，在右侧面板左边的空间里居中 */
+.dock{position:absolute;z-index:3;left:var(--edge-l);right:calc(var(--edge-r) + var(--rp) + var(--gap));bottom:var(--edge-b);
+  display:flex;flex-direction:column;align-items:center;gap:10px;pointer-events:none;transition:right .25s}
+.dock>*{pointer-events:auto}
+.explain{display:flex;gap:12px;align-items:flex-start;margin:0;padding:10px 16px;max-width:min(820px,100%);font-size:14.5px}
+.explain b{flex:none;font-size:12px;font-weight:700;letter-spacing:.08em;color:var(--copper);padding-top:2px}
+.toolbar{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;padding:8px;max-width:100%}
+.toolbar .sep{width:1px;align-self:stretch;background:rgba(140,175,230,.16);margin:2px 4px}
+
+/* 负反馈环框图，按需弹出在底部按钮上方 */
+.loop-pop{position:absolute;z-index:4;left:var(--edge-l);right:calc(var(--edge-r) + var(--rp) + var(--gap));bottom:calc(var(--edge-b) + var(--dock-h) + 10px);
+  margin:0 auto;max-width:1080px;padding:12px 16px 10px;transition:right .25s}
+.loop-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}
+.loop-head h2{margin:0}
+.loop-scroll{overflow-x:auto}
+.loop-scroll svg{display:block;min-width:820px;width:100%;height:auto}
+svg .blk rect{fill:rgba(13,20,31,.85);stroke:rgba(140,175,230,.22);stroke-width:1.4}
+svg .blk.hot rect{stroke:var(--copper);stroke-width:2}
+svg .blk.sat rect{stroke:var(--warn);stroke-width:2}
+svg .blk.bad rect{stroke:var(--bad);stroke-width:2.2}
+svg .blk.dim{opacity:.45}
+svg .ttl{fill:var(--ink);font-size:15px;font-weight:700}
+svg .tag{fill:var(--muted);font-size:11.5px}
+svg .val{fill:var(--ink);font-family:var(--font-num);font-size:12.5px}
+svg .lbl{fill:var(--muted);font-family:var(--font-num);font-size:12px}
+svg .sign{fill:var(--ink);font-size:15px;font-weight:700}
+svg .wire{fill:none;stroke:var(--field);stroke-width:1.6;opacity:.75}
+svg .flow{stroke-dasharray:6 6;animation:dash 0.9s linear infinite}
+svg .wire.cut{stroke:var(--bad);animation:none;stroke-dasharray:3 4;opacity:1}
+svg .wire.off{opacity:.25;animation:none}
+svg .sum{fill:rgba(13,20,31,.85);stroke:var(--ink);stroke-width:1.6}
+svg .ah{fill:var(--field)}
+svg .dsym{fill:none;stroke:var(--muted);stroke-width:1.6}
+svg .blk.on .dsym{stroke:var(--glow);fill:rgba(255,174,99,.35)}
+svg .cutmark{fill:var(--bad);font-size:13px;font-weight:700}
+@keyframes dash{to{stroke-dashoffset:-24}}
+
+/* 三维标注 */
+.labels3d{position:absolute;inset:0;pointer-events:none;z-index:1;overflow:hidden}
+.labels3d.off{display:none}
+.l3{position:absolute;left:0;top:0;width:0;height:0}
+.l3 i{position:absolute;left:-3.5px;top:-3.5px;width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 10px var(--cyan)}
+.l3 span{position:absolute;white-space:nowrap;font-size:12.5px;line-height:1.3;padding:3px 9px;border-radius:7px;background:rgba(9,14,24,.72);border:1px solid rgba(140,175,230,.22);color:var(--ink);font-variant-numeric:tabular-nums}
+.l3.up span{left:0;bottom:11px;transform:translateX(-50%)}
+.l3.left span{right:11px;top:0;transform:translateY(-50%)}
+.l3.right span{left:11px;top:0;transform:translateY(-50%)}
+
+/* 窄屏：参数面板改成整宽浮层，默认收起 */
+@media (max-width:820px){
+  :root{--rp:0px}
+  .hud-tl{width:min(300px,calc(100vw - 32px));padding:10px 12px}
+  .hud-tl .sub,.hud-tl .hint,.eyebrow{display:none}
+  h1{font-size:16px}
+  .ro output{font-size:14px}
+  /* 开关改成底部按钮上方可以横向滑动的一行 */
+  .hud-tr{top:auto;left:var(--edge-l);right:var(--edge-r);bottom:calc(var(--edge-b) + var(--dock-h) + 8px);max-width:none;
+    flex-wrap:nowrap;justify-content:flex-start;overflow-x:auto;scrollbar-width:none}
+  .hud-tr>*{flex:none}
+  .hud-right{left:var(--edge-l);width:auto;top:calc(var(--edge-t) + 120px);bottom:calc(var(--edge-b) + var(--dock-h) + 56px)}
+  .explain{font-size:13px;padding:8px 12px}
+  .toolbar button.act{padding:6px 9px;font-size:12.5px}
+  .toolbar kbd,.hud-tr kbd{display:none}
+  .loop-pop{bottom:calc(var(--edge-b) + var(--dock-h) + 56px)}
+}
+@media (prefers-reduced-motion:reduce){svg .flow{animation:none}.hud-right,.dock,.loop-pop{transition:none}}
+</style>
+
+<div class="app" id="app">
+  <div class="stage3d" id="stage3d">
+    <div class="labels3d" id="labels3d" aria-hidden="true"></div>
+  </div>
+  <canvas id="stage" hidden aria-label="电磁铁吸住地球仪的平面动画，间隙放大显示"></canvas>
+
+  <section class="hud hud-tl glass" aria-label="状态和读数">
+    <p class="eyebrow">MAGLEV · ANALOG PID</p>
+    <h1>磁悬浮地球仪控制台</h1>
+    <p class="sub">电路与模拟电子技术 · 期末项目演示</p>
+    <div class="pills">
+      <span class="pill ok" id="status">稳定悬浮</span>
+      <span class="pill" id="theory">理论：稳定</span>
+    </div>
+    <div class="readouts">
+      <div class="ro"><span>间隙 x</span><output id="r-x">10.00 mm</output></div>
+      <div class="ro"><span>偏离目标</span><output id="r-dx">+0.00 mm</output></div>
+      <div class="ro"><span>线圈电流</span><output id="r-i">0.600 A</output></div>
+      <div class="ro"><span>线圈电压</span><output id="r-v">6.00 V</output></div>
+      <div class="ro"><span>功率管发热</span><output id="r-p">3.6 W</output></div>
+    </div>
+    <p class="hint">拖动旋转；点一下场景后可用滚轮缩放；双击回到斜视。间隙变化放大约 3 倍显示。</p>
+    <span class="low-fps" id="fps-hint" hidden></span>
+  </section>
+
+  <div class="hud hud-tr">
+    <div class="seg glass" id="speed" role="group" aria-label="仿真速度">
+      <button type="button" data-speed="1" aria-pressed="false">实时 <kbd>1</kbd></button>
+      <button type="button" data-speed="0.25" aria-pressed="true">慢放 4× <kbd>2</kbd></button>
+      <button type="button" data-speed="0.1" aria-pressed="false">慢放 10× <kbd>3</kbd></button>
+      <button type="button" data-speed="0" aria-pressed="false">暂停 <kbd>P</kbd></button>
+    </div>
+    <div class="seg glass" id="views" role="group" aria-label="视角">
+      <button type="button" data-view="angle" aria-pressed="true">斜视</button>
+      <button type="button" data-view="front" aria-pressed="false">正面</button>
+      <button type="button" data-view="board" aria-pressed="false">电路板</button>
+    </div>
+    <button type="button" class="act glass" id="b-labels" aria-pressed="true">标注</button>
+    <div class="seg glass" id="modes" role="group" aria-label="显示方式">
+      <button type="button" data-mode="3d" aria-pressed="true">三维</button>
+      <button type="button" data-mode="2d" aria-pressed="false">平面</button>
+    </div>
+    <button type="button" class="act glass" id="b-panel" aria-pressed="true" aria-controls="panel">参数面板 <kbd>H</kbd></button>
+  </div>
+
+  <aside class="hud hud-right glass" id="panel" aria-label="示波器和 PID 参数">
+    <section aria-label="示波器">
+      <h2 id="scope-title">示波器 · 最近 2 秒</h2>
+      <div class="circ-row">
+        <div class="seg" id="circ-mode" role="group" aria-label="电路对照">
+          <button type="button" data-circ="off" aria-pressed="true">不对照</button>
+          <button type="button" data-circ="stored" aria-pressed="false">预存电路</button>
+          <button type="button" data-circ="live" aria-pressed="false">实时电路</button>
+        </div>
+        <button type="button" class="act small" id="b-redo" hidden>重做并对照 <kbd>C</kbd></button>
+      </div>
+      <p class="circ-status" id="circ-status" aria-live="polite"></p>
+      <div class="scope-legend">
+        <span><i style="background:var(--t-x)"></i>间隙 x（mm）</span>
+        <span><i style="background:var(--t-i)"></i>电流 i（A）</span>
+        <span><i style="background:var(--t-v)"></i>电压 V（V）</span>
+        <span id="lg-circ" hidden><i class="dash"></i>电路仿真（LTspice）</span>
+      </div>
+      <canvas id="scope" aria-label="间隙、电流、电压随时间变化的曲线"></canvas>
+    </section>
+    <section aria-label="PID 参数">
+      <h2>PID 参数 · 拧旋钮就是换电阻</h2>
+      <div class="knob">
+        <label for="kp">比例 Kp<small>托住的力度</small></label>
+        <input type="range" id="kp" min="0" max="10" step="0.1">
+        <output id="kp-o"></output>
+        <div class="res" id="kp-r"></div>
+      </div>
+      <div class="knob">
+        <label for="ki">积分 Ki<small>消除偏差</small></label>
+        <input type="range" id="ki" min="0" max="200" step="1">
+        <output id="ki-o"></output>
+        <div class="res" id="ki-r"></div>
+      </div>
+      <div class="knob">
+        <label for="kd">微分 Kd<small>阻尼，防晃</small></label>
+        <input type="range" id="kd" min="0" max="0.15" step="0.001">
+        <output id="kd-o"></output>
+        <div class="res" id="kd-r"></div>
+      </div>
+      <canvas id="map" aria-label="Kp 与 Kd 平面上的稳定区域和当前参数点"></canvas>
+      <p class="map-cap">绿色区域：简化模型按劳斯判据算出的稳定区。圆点是当前参数。</p>
+      <p class="poles" id="poles"></p>
+    </section>
+  </aside>
+
+  <section class="hud loop-pop glass" id="loop" hidden aria-label="负反馈环">
+    <div class="loop-head">
+      <h2>负反馈环 · 每一块对应一个课程知识点</h2>
+      <button type="button" class="act" id="b-loop-close">收起 <kbd>L</kbd></button>
+    </div>
+    <div class="loop-scroll">
+      <svg viewBox="0 0 1040 244" role="img" aria-label="设定高度、减法器、PID、驱动级、线圈、电磁力、小球、霍尔传感器组成的负反馈环">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path class="ah" d="M0 0 L10 5 L0 10 z"></path>
+          </marker>
+        </defs>
+        <path class="wire flow" d="M144 63 H165" marker-end="url(#ah)"></path>
+        <path class="wire flow" d="M201 63 H224" marker-end="url(#ah)"></path>
+        <path class="wire flow" d="M412 63 H446" marker-end="url(#ah)"></path>
+        <path class="wire flow" id="w-drv" d="M634 63 H668" marker-end="url(#ah)"></path>
+        <path class="wire" d="M856 46 H872 M856 80 H872"></path>
+        <path class="wire flow" d="M763 102 V148" marker-end="url(#ah)"></path>
+        <path class="wire flow" d="M670 189 H636" marker-end="url(#ah)"></path>
+        <path class="wire flow" d="M448 189 H414" marker-end="url(#ah)"></path>
+        <path class="wire flow" id="w-fb" d="M226 189 H184 V82" marker-end="url(#ah)"></path>
+        <text class="lbl" x="424" y="56">u</text>
+        <text class="lbl" x="640" y="56">i_cmd</text>
+        <text class="lbl" x="771" y="130">i</text>
+        <text class="lbl" x="646" y="182">F</text>
+        <text class="lbl" x="424" y="182">x</text>
+        <text class="lbl" x="192" y="182">y</text>
+        <text class="sign" x="150" y="54">+</text>
+        <text class="sign" x="192" y="100">−</text>
+        <text class="cutmark" id="cutmark" x="196" y="140" visibility="hidden">✕ 反馈断开</text>
+        <circle class="sum" cx="184" cy="63" r="17"></circle>
+        <path class="wire" d="M174 63 H194 M184 53 V73" style="animation:none;stroke:var(--ink)"></path>
+        <g class="blk" id="g-ref"><rect x="16" y="24" width="128" height="78" rx="8"></rect>
+          <text class="ttl" x="28" y="48">设定高度</text><text class="tag" x="28" y="67">电位器给定</text>
+          <text class="val" x="28" y="88" id="v-ref"></text></g>
+        <g class="blk" id="g-pid"><rect x="226" y="24" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="240" y="48">PID 控制器</text><text class="tag" x="240" y="67">比例·积分·微分·求和运算电路</text>
+          <text class="val" x="240" y="88" id="v-pid"></text></g>
+        <g class="blk" id="g-drv"><rect x="448" y="24" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="462" y="48">驱动级</text><text class="tag" x="462" y="67">运放 + 三极管 · 电流串联负反馈</text>
+          <text class="val" x="462" y="88" id="v-drv"></text></g>
+        <g class="blk" id="g-coil"><rect x="670" y="24" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="684" y="48">电磁铁线圈</text><text class="tag" x="684" y="67">一阶 RL 电路 · τ = L/R = 10 ms</text>
+          <text class="val" x="684" y="88" id="v-coil"></text></g>
+        <g class="blk" id="g-diode"><rect x="872" y="24" width="152" height="78" rx="8"></rect>
+          <text class="ttl" x="886" y="48">续流二极管</text><text class="tag" x="886" y="67">关断时给电流留路</text>
+          <text class="val" x="886" y="88" id="v-diode"></text>
+          <path class="dsym" d="M996 58 L1012 58 L1004 44 Z M995 43 H1013 M1004 58 V66 M1004 44 V36"></path></g>
+        <g class="blk" id="g-force"><rect x="670" y="150" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="684" y="174">电磁力</text><text class="tag" x="684" y="193">F = k·i²/x²（非线性）</text>
+          <text class="val" x="684" y="214" id="v-force"></text></g>
+        <g class="blk" id="g-ball"><rect x="448" y="150" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="462" y="174">地球仪</text><text class="tag" x="462" y="193">m·a = m·g − F</text>
+          <text class="val" x="462" y="214" id="v-ball"></text></g>
+        <g class="blk" id="g-hall"><rect x="226" y="150" width="186" height="78" rx="8"></rect>
+          <text class="ttl" x="240" y="174">霍尔传感器</text><text class="tag" x="240" y="193">测位置 · 减法器扣除线圈磁场</text>
+          <text class="val" x="240" y="214" id="v-hall"></text></g>
+      </svg>
+    </div>
+  </section>
+
+  <div class="dock">
+    <p class="explain glass" aria-live="polite"><b>讲解</b><span id="explain"></span></p>
+    <div class="toolbar glass" role="group" aria-label="实验">
+      <button type="button" class="act" id="b-release">放手重来 <kbd>R</kbd></button>
+      <button type="button" class="act" id="b-push">推一下 <kbd>空格</kbd></button>
+      <button type="button" class="act" id="b-weight" aria-pressed="false">加重物 <kbd>W</kbd></button>
+      <button type="button" class="act" id="b-int" aria-pressed="true">积分环节 <kbd>I</kbd></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="act risky" id="b-fb" aria-pressed="false">断开反馈 <kbd>F</kbd></button>
+      <button type="button" class="act risky" id="b-drive" aria-pressed="false">关断驱动 <kbd>X</kbd></button>
+      <button type="button" class="act risky" id="b-diode" aria-pressed="false">拆掉续流二极管 <kbd>D</kbd></button>
+      <span class="sep" aria-hidden="true"></span>
+      <button type="button" class="act" id="b-loop" aria-pressed="false" aria-controls="loop">负反馈环 <kbd>L</kbd></button>
+    </div>
+  </div>
+</div>
+
+<!-- 参数和预存的电路波形，由 python sim/export_web.py 生成；没有这两个文件时网页照样能用 -->
+<script src="data/params.js"></script>
+<script src="data/circuit.js"></script>
+<!-- 三维库 three.js r147：优先用项目里的离线副本，没有再从网络加载；都失败就退回平面舞台 -->
+<script src="vendor/three.min.js"></script>
+<script>if(!window.THREE){document.write('<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"><\/script>');}</script>
+<script>
+'use strict';
+/* ===== 参数：必须与 model/params.json 保持一致 ===== */
+// 优先用 data/params.js（由 model/params.json 自动生成）；找不到时用下面这份内置参数
+const PARAMS = window.MAGLEV_PARAMS || {
+  plant:{m_kg:0.05,g_m_per_s2:9.81,x0_m:0.010,i0_A:0.6,R_ohm:10.0,L_H:0.1,x_contact_m:0.003,x_lost_m:0.025,x_floor_m:0.045},
+  sensor:{ks_V_per_m:100.0},
+  driver:{Vs_V:12.0,Vsat_V:1.0,Vd_V:0.7,Gm_A_per_V:0.5,Kc_V_per_A:200.0,Vbreakdown_V:60.0},
+  controller:{Kp:3.4,Ki_per_s:30.0,Kd_s:0.05,tau_f_s:0.001,u_min_V:-10.0,u_max_V:10.0},
+  scenarios:{release_offset_m:0.002,push_force_N:0.3,push_duration_s:0.02,extra_mass_ratio:0.2}
+};
+
+const clamp = (v,a,b)=> v<a?a:(v>b?b:v);
+
+/* 派生量：文档第三节、第五节 */
+function derive(P){
+  const p=P.plant, d=P.driver, s=P.sensor;
+  const k = p.m_kg*p.g_m_per_s2*p.x0_m*p.x0_m/(p.i0_A*p.i0_A);   // F = k·i²/x² 的常数
+  const a = 2*p.g_m_per_s2/p.x0_m, b = 2*p.g_m_per_s2/p.i0_A;
+  return { k, a, b, c: b*d.Gm_A_per_V*s.ks_V_per_m, Vbias: p.i0_A/d.Gm_A_per_V,
+           yref: s.ks_V_per_m*p.x0_m, pole: Math.sqrt(a), Vhigh: d.Vs_V-d.Vsat_V };
+}
+
+/* ===== 仿真模型：状态 [x, v, i, z, w]，方程见文档第三、四节 ===== */
+class Maglev {
+  constructor(P){
+    this.P=P; this.D=derive(P);
+    const c=P.controller;
+    this.gain={Kp:c.Kp, Ki:c.Ki_per_s, Kd:c.Kd_s};
+    this.feedback=true; this.integral=true; this.diode=true;
+    this.massRatio=0; this.noiseF=0; this.t=0; this.lastEventT=0;
+    this.release();
+  }
+  err(x){ return this.P.sensor.ks_V_per_m*x - this.D.yref; }
+  Vlow(){ const d=this.P.driver; return this.diode ? -d.Vd_V : -(d.Vbreakdown_V-d.Vs_V); }
+  release(){
+    const p=this.P.plant, x=p.x0_m+this.P.scenarios.release_offset_m;
+    // 放手前手托着球、电流处于平衡值；微分滤波器从当前误差起步
+    this.s={x, v:0, i:p.i0_A, z:0, w:this.err(x)};
+    this.drive=true; this.damaged=false; this.spike=null; this.pushUntil=-1;
+    this.out=this.f(this.s);
+  }
+  push(){ this.pushUntil=this.t+this.P.scenarios.push_duration_s; }
+  f(s){
+    const p=this.P.plant, d=this.P.driver, c=this.P.controller, g=this.gain;
+    const e=this.err(s.x);                         // 误差 e = y − y_ref
+    const dw=(e-s.w)/c.tau_f_s;                    // 微分滤波
+    let u=0, dz=0;
+    if(this.feedback){
+      const I=this.integral ? g.Ki*s.z : 0;
+      u=clamp(g.Kp*e + I + g.Kd*(e-s.w)/c.tau_f_s, c.u_min_V, c.u_max_V);
+      if(this.integral){ dz=e; if((I>=c.u_max_V&&e>0)||(I<=c.u_min_V&&e<0)) dz=0; } // 防积分饱和
+    }
+    const icmd=(this.drive&&!this.damaged) ? Math.max(0, d.Gm_A_per_V*(this.D.Vbias+u)) : 0;
+    let Vc=clamp(p.R_ohm*s.i + d.Kc_V_per_A*(icmd-s.i), this.Vlow(), this.D.Vhigh);
+    let di=(Vc-p.R_ohm*s.i)/p.L_H;                 // L·di/dt = V − R·i
+    if(s.i<=0 && di<0){ di=0; Vc=0; }              // 电流不能反向
+    const m=p.m_kg*(1+this.massRatio);
+    const F=this.D.k*s.i*s.i/(s.x*s.x);            // 电磁力
+    const Fext=(this.t<this.pushUntil ? this.P.scenarios.push_force_N : 0) + this.noiseF;
+    return {dx:s.v, dv:p.g_m_per_s2 - F/m + Fext/m, di, dz, dw, e, u, icmd, Vc, F, m};
+  }
+  step(h){
+    const s=this.s, f=(st)=>this.f(st);
+    const add=(k,sc)=>({x:s.x+k.dx*sc, v:s.v+k.dv*sc, i:s.i+k.di*sc, z:s.z+k.dz*sc, w:s.w+k.dw*sc});
+    const k1=f(s), k2=f(add(k1,h/2)), k3=f(add(k2,h/2)), k4=f(add(k3,h));
+    const r=(q)=>h/6*(k1[q]+2*k2[q]+2*k3[q]+k4[q]);
+    const n={x:s.x+r('dx'), v:s.v+r('dv'), i:s.i+r('di'), z:s.z+r('dz'), w:s.w+r('dw')};
+    const c=this.P.controller, p=this.P.plant;
+    if(n.i<0) n.i=0;
+    if(this.gain.Ki>0) n.z=clamp(n.z, c.u_min_V/this.gain.Ki, c.u_max_V/this.gain.Ki);
+    if(n.x<=p.x_contact_m){ n.x=p.x_contact_m; if(n.v<0) n.v=0; }   // 被吸住
+    if(n.x>=p.x_floor_m){ n.x=p.x_floor_m; if(n.v>0) n.v=0; }       // 落在底座上
+    this.s=n; this.t+=h; this.out=this.f(n);
+    if(!this.diode && !this.damaged && n.i>0.02 && this.out.Vc<=this.Vlow()+1e-6){
+      this.damaged=true; this.spike={i:n.i, V:p.L_H*n.i/1e-6};   // 理论尖峰 L·Δi/Δt，Δt 取 1 µs
+    }
+  }
+  get stuck(){ return this.s.x<=this.P.plant.x_contact_m+1e-9 && this.out.dv<=0; }
+  get fallen(){ return this.s.x>this.P.plant.x_lost_m; }
+}
+
+/* 自检：不加噪声跑"放手"场景，用来和 Python 的 ref_release.csv 对照 */
+window.maglevSelfTest = function(times=[0.005,0.01,0.02,0.05,0.1,0.2,0.3,0.5,1.0]){
+  const m=new Maglev(PARAMS), h=1e-4, out=[];
+  let k=0;
+  for(const T of times){
+    while(m.t < T-1e-9){ m.step(h); k++; }
+    out.push({t:+m.t.toFixed(4), x_mm:+(m.s.x*1000).toFixed(4), i_A:+m.s.i.toFixed(4), V:+m.out.Vc.toFixed(3), u:+m.out.u.toFixed(4)});
+  }
+  return out;
+};
+
+/* ===== 界面 ===== */
+const $=(q)=>document.querySelector(q);
+const sim=new Maglev(PARAMS);
+const TOK=['paper','panel','ink','muted','line','grid','copper','glow','steel','field','ocean','land','brass','t-x','t-i','t-v','ok','warn','bad'];
+const T={};
+function readTokens(){ const cs=getComputedStyle(document.documentElement); for(const n of TOK) T[n]=cs.getPropertyValue('--'+n).trim()||'#888'; }
+readTokens();
+
+let speed=0.25, paused=false, lastNow=performance.now(), rot=0, phase=0, flash=0;
+const NOISE_SIGMA=0.0015, NOISE_TAU=0.05;
+function randn(){ let u=0,v=0; while(!u)u=Math.random(); while(!v)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+
+/* 示波器缓存：每 1 ms（仿真时间）记一个点，保留 2 s */
+const N=12000, buf={t:new Float64Array(N), x:new Float64Array(N), i:new Float64Array(N), v:new Float64Array(N)};   // 保留 6 s，对照时要回看动作前后
+let head=0, count=0, nextSample=0;
+function record(){ buf.t[head]=sim.t; buf.x[head]=sim.s.x*1000; buf.i[head]=sim.s.i; buf.v[head]=sim.out.Vc; head=(head+1)%N; if(count<N)count++; }
+function eachSample(fn){ for(let j=0;j<count;j++){ const q=(head-count+j+N)%N; fn(buf.t[q],buf.x[q],buf.i[q],buf.v[q]); } }
+
+/* ---------- 讲解文字 ---------- */
+const TXT={
+  start:'小球从比目标低 2 mm 的地方松手。霍尔传感器测出它偏低，PID 加大线圈电流，把它拉回 10 mm 并稳住。试试"推一下"。',
+  release:'放手重来：小球从比目标低 2 mm 处松开，控制电路把它拉回 10 mm。三极管和所有开关恢复原样。',
+  push:'推一下：向下推 0.3 N、持续 20 ms。比例环节按偏离的距离出力，微分环节感受到速度，抢先加大电流，所以球很快回来、不乱晃。',
+  weightOn:'加重物：质量多了 20%。如果只有比例和微分，球要偏低一点才能换来更大的电流，留下稳态误差；积分环节会把误差慢慢累积起来，最后把球拉回原位。可以关掉积分对比。',
+  weightOff:'取下重物：质量恢复到 50 g。',
+  intOff:'关掉积分：现在是 PD 控制。加上重物后，球会停在比目标略低的位置，这就是稳态误差。',
+  intOn:'打开积分：积分电容把误差一点点累积起来，直到误差为零才停止变化。',
+  fbOff:'断开反馈：电流固定在平衡值 0.6 A，可球还是待不住。偏低一点，磁力变小，越掉越快；偏高一点，磁力变大，被吸上去。开环不稳定，必须靠负反馈。',
+  fbOn:'接回反馈：如果球已经掉落或被吸住，按"放手重来"。',
+  driveOff:'关断驱动：三极管突然截止。线圈电流经续流二极管按 τ = L/R = 10 ms 慢慢衰减，球掉下来，但电路是安全的。',
+  driveOffNoDiode:'没有续流二极管，线圈电流无路可走。按 u = L·di/dt，理论上会产生几万伏的尖峰，实际上三极管在 60 V 就被击穿了。按"放手重来"换一个新三极管。',
+  driveOn:'恢复驱动：按"放手重来"让球重新悬浮。',
+  diodeOff:'已拆掉续流二极管。平时悬浮看不出差别，现在试试"关断驱动"。',
+  diodeOn:'装回续流二极管：线圈关断时电流有路可走，三极管两端最多只比电源高 0.7 V。',
+  kp:'比例 Kp 像弹簧的硬度：低于 1.2 就托不住球；越大回得越快，但也更容易晃。',
+  ki:'积分 Ki 负责消除稳态误差。太大会和微分抢着出力，引起振荡。',
+  kd:'微分 Kd 像阻尼器：它看的是球的速度。太小，球会越晃越厉害直到掉下来。'
+};
+const explainEl=$('#explain');
+function say(k){ explainEl.textContent=TXT[k]; }
+say('start');
+
+/* ---------- 按钮 ---------- */
+function setPressed(id,on){ $(id).setAttribute('aria-pressed', on?'true':'false'); }
+function syncButtons(){
+  setPressed('#b-weight', sim.massRatio>0); $('#b-weight').firstChild.nodeValue = sim.massRatio>0?'取下重物 ':'加重物 ';
+  setPressed('#b-int', sim.integral);
+  setPressed('#b-fb', !sim.feedback); $('#b-fb').firstChild.nodeValue = sim.feedback?'断开反馈 ':'接回反馈 ';
+  setPressed('#b-drive', !sim.drive); $('#b-drive').firstChild.nodeValue = sim.drive?'关断驱动 ':'恢复驱动 ';
+  setPressed('#b-diode', !sim.diode); $('#b-diode').firstChild.nodeValue = sim.diode?'拆掉续流二极管 ':'装回续流二极管 ';
+  drawMap(); updateTheory();
+}
+const actions={
+  release(){ sim.release(); say('release'); },
+  push(){ sim.push(); say('push'); },
+  weight(){ sim.massRatio = sim.massRatio>0?0:PARAMS.scenarios.extra_mass_ratio; say(sim.massRatio>0?'weightOn':'weightOff'); },
+  integral(){ sim.integral=!sim.integral; if(!sim.integral) sim.s.z=0; say(sim.integral?'intOn':'intOff'); },
+  feedback(){ sim.feedback=!sim.feedback; say(sim.feedback?'fbOn':'fbOff'); },
+  drive(){ sim.drive=!sim.drive; if(sim.drive){ say('driveOn'); } else { say(sim.diode?'driveOff':'driveOffNoDiode'); } },
+  diode(){ sim.diode=!sim.diode; say(sim.diode?'diodeOn':'diodeOff'); }
+};
+function run(name){
+  const pre={x:sim.s.x, v:sim.s.v, mass:sim.massRatio, feedback:sim.feedback};   // 动作之前的状态，给电路对照用
+  actions[name](); sim.lastEventT=sim.t; syncButtons();
+  circuitOnAction(name,pre);
+}
+$('#b-release').onclick=()=>run('release');
+$('#b-push').onclick=()=>run('push');
+$('#b-weight').onclick=()=>run('weight');
+$('#b-int').onclick=()=>run('integral');
+$('#b-fb').onclick=()=>run('feedback');
+$('#b-drive').onclick=()=>run('drive');
+$('#b-diode').onclick=()=>run('diode');
+
+function setSpeed(v){
+  paused = v===0; if(v>0) speed=v;
+  document.querySelectorAll('#speed button').forEach(b=>{
+    const bv=+b.dataset.speed; b.setAttribute('aria-pressed', (paused? bv===0 : (bv===speed)) ? 'true':'false');
+  });
+}
+document.querySelectorAll('#speed button').forEach(b=> b.onclick=()=>{ const v=+b.dataset.speed; setSpeed(v===0 && paused ? speed : v); });
+
+document.addEventListener('keydown',(e)=>{
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  const tag=e.target.tagName;
+  if(e.key===' '){ if(tag==='BUTTON'||tag==='INPUT') return; e.preventDefault(); run('push'); return; }
+  const map={r:'release',w:'weight',i:'integral',f:'feedback',x:'drive',d:'diode'};
+  const k=e.key.toLowerCase();
+  if(map[k]){ run(map[k]); return; }
+  if(k==='h'){ setPanel(document.body.classList.contains('panel-closed')); return; }
+  if(k==='l'){ setLoop($('#loop').hidden); return; }
+  if(k==='c'){ redoCompare(); return; }
+  if(k==='1') setSpeed(1); else if(k==='2') setSpeed(0.25); else if(k==='3') setSpeed(0.1);
+  else if(k==='p') setSpeed(paused?speed:0);
+});
+
+/* ---------- PID 旋钮 ---------- */
+const fmtR=(o)=> o>=1e6 ? (o/1e6).toFixed(2)+' MΩ' : o>=1e3 ? (o/1e3).toFixed(o<1e4?2:1)+' kΩ' : o.toFixed(0)+' Ω';
+const nz=(v,d)=> { const r=+v.toFixed(d); return (r===0?0:r).toFixed(d); };     // 避免显示 −0.00
+const sg=(v,d)=> { const r=+v.toFixed(d); return (r>=0?'+':'−')+Math.abs(r).toFixed(d); };
+function syncKnobs(){
+  const g=sim.gain, tf=PARAMS.controller.tau_f_s;
+  $('#kp').value=g.Kp; $('#ki').value=g.Ki; $('#kd').value=g.Kd;
+  $('#kp-o').textContent=g.Kp.toFixed(1);
+  $('#ki-o').textContent=g.Ki.toFixed(0)+' /s';
+  $('#kd-o').textContent=g.Kd.toFixed(3)+' s';
+  $('#kp-r').textContent = g.Kp>0 ? `反相比例：Rf = ${fmtR(g.Kp*1e4)}（R1 = 10 kΩ）` : '比例：断开';
+  $('#ki-r').textContent = g.Ki>0 ? `积分：R = ${fmtR(1/(g.Ki*1e-6))}（C = 1 µF）` : '积分：电阻断开';
+  $('#kd-r').textContent = g.Kd>0 ? `微分：R = ${fmtR(g.Kd/1e-6)}（C = 1 µF，串 ${fmtR(tf/1e-6)} 限流）` : '微分：电阻断开';
+}
+let lastKnob='';
+for(const [id,key] of [['kp','Kp'],['ki','Ki'],['kd','Kd']]){
+  $('#'+id).addEventListener('input',(e)=>{
+    sim.gain[key]=+e.target.value; sim.lastEventT=sim.t; syncKnobs(); drawMap(); updateTheory();
+    if(lastKnob!==id){ say(id); lastKnob=id; }
+  });
+}
+
+/* ---------- 闭环极点（简化模型） ---------- */
+function polyRoots(coef){ // Durand–Kerner，coef 从最高次开始
+  const n=coef.length-1, a=coef.map(v=>v/coef[0]);
+  const Rb=1+Math.max(...a.slice(1).map(Math.abs));
+  let r=[]; for(let k=0;k<n;k++){ const th=2*Math.PI*k/n+0.4; r.push([Rb*Math.cos(th),Rb*Math.sin(th)]); }
+  const mul=(p,q)=>[p[0]*q[0]-p[1]*q[1], p[0]*q[1]+p[1]*q[0]];
+  const div=(p,q)=>{ const d=q[0]*q[0]+q[1]*q[1]||1e-30; return [(p[0]*q[0]+p[1]*q[1])/d,(p[1]*q[0]-p[0]*q[1])/d]; };
+  for(let it=0;it<300;it++){
+    for(let k=0;k<n;k++){
+      let pv=[1,0]; for(let j=1;j<=n;j++) pv=[pv[0]*r[k][0]-pv[1]*r[k][1]+a[j], pv[0]*r[k][1]+pv[1]*r[k][0]];
+      let den=[1,0]; for(let j=0;j<n;j++) if(j!==k) den=mul(den,[r[k][0]-r[j][0], r[k][1]-r[j][1]]);
+      const q=div(pv,den); r[k]=[r[k][0]-q[0], r[k][1]-q[1]];
+    }
+  }
+  return r;
+}
+function poleText(){
+  const {a,c}=sim.D, g=sim.gain, Ki=sim.integral?g.Ki:0;
+  if(!sim.feedback) return `开环极点：±${sim.D.pole.toFixed(1)} /s，其中 +${sim.D.pole.toFixed(1)} 在右半平面`;
+  const roots = Ki>0 ? polyRoots([1, c*g.Kd, c*g.Kp-a, c*Ki]) : polyRoots([1, c*g.Kd, c*g.Kp-a]);
+  const parts=[]; let zeta=null; const used=new Set();
+  roots.sort((p,q)=>q[0]-p[0]);
+  roots.forEach((p,k)=>{
+    if(used.has(k)) return;
+    if(Math.abs(p[1])>1e-6){
+      const j=roots.findIndex((q,m)=>m!==k&&!used.has(m)&&Math.abs(q[0]-p[0])<1e-3*Math.max(1,Math.abs(p[0]))&&Math.abs(q[1]+p[1])<1e-3*Math.max(1,Math.abs(p[1])));
+      if(j>=0) used.add(j);
+      parts.push(`${sg(p[0],1)} ± j${Math.abs(p[1]).toFixed(1)}`);
+      if(zeta===null) zeta=-p[0]/Math.hypot(p[0],p[1]);
+    } else parts.push(sg(p[0],1));
+    used.add(k);
+  });
+  return `闭环极点：${parts.join('，')} /s` + (zeta!==null?`　阻尼比 ζ ≈ ${zeta.toFixed(2)}`:'');
+}
+function theory(){
+  const {a,c}=sim.D, g=sim.gain, Ki=sim.integral?g.Ki:0;
+  if(!sim.drive||sim.damaged) return ['bad','理论：没有驱动电流'];
+  if(!sim.feedback) return ['bad','理论：开环不稳定'];
+  if(g.Kp<=a/c) return ['bad','理论：比例太小，不稳定'];
+  if(g.Kd<=0) return Ki>0 ? ['bad','理论：没有微分，不稳定'] : ['warn','理论：临界，等幅振荡'];
+  if(Ki>0 && Ki>=g.Kd*(c*g.Kp-a)) return ['bad','理论：积分太强或微分太弱，不稳定'];
+  return ['ok','理论：稳定'];
+}
+function updateTheory(){ const [cls,txt]=theory(); const el=$('#theory'); el.className='pill '+cls; el.textContent=txt; $('#poles').textContent=poleText(); }
+
+/* ---------- 画布尺寸 ---------- */
+const stageCv=$('#stage'), scopeCv=$('#scope'), mapCv=$('#map');
+const SW=440, SH=520, MW=300, MH=190;
+let sctx, kctx, mctx, scopeW=360; const SCOPE_H=210;
+let stage3d=null;
+const panelWidth=()=>parseFloat(getComputedStyle(document.body).getPropertyValue('--rp'))||0;
+function fit(){
+  const dpr=window.devicePixelRatio||1, app=$('#app'), rp=panelWidth();
+  // 平面舞台：放进右侧面板左边、底部按钮上方的空间里
+  { const s=Math.max(0.35,Math.min((app.clientWidth-rp-60)/SW,(app.clientHeight-260)/SH)), w=SW*s, h=SH*s;
+    stageCv.style.width=w+'px'; stageCv.style.height=h+'px'; stageCv.width=Math.round(w*dpr); stageCv.height=Math.round(h*dpr);
+    sctx=stageCv.getContext('2d'); sctx.setTransform(stageCv.width/SW,0,0,stageCv.height/SH,0,0); }
+  if(scopeCv.clientWidth){ scopeW=scopeCv.clientWidth; scopeCv.style.height=SCOPE_H+'px'; scopeCv.width=Math.round(scopeW*dpr); scopeCv.height=Math.round(SCOPE_H*dpr);
+    kctx=scopeCv.getContext('2d'); kctx.setTransform(dpr,0,0,dpr,0,0); }
+  if(mapCv.clientWidth){ const w=mapCv.clientWidth, h=w*MH/MW; mapCv.style.height=h+'px'; mapCv.width=Math.round(w*dpr); mapCv.height=Math.round(h*dpr);
+    mctx=mapCv.getContext('2d'); mctx.setTransform(mapCv.width/MW,0,0,mapCv.height/MH,0,0); }
+  drawMap(); updateInsets();
+}
+// 告诉三维舞台哪些地方被面板挡住，让模型落在剩下空间的正中
+function updateInsets(){
+  const dock=document.querySelector('.dock'), tr=document.querySelector('.hud-tr');
+  if(dock) document.body.style.setProperty('--dock-h',dock.offsetHeight+'px');
+  if(tr) document.body.style.setProperty('--tr-h',tr.offsetHeight+'px');   // 右上角开关折行时，参数面板跟着往下让
+  if(!stage3d) return;
+  const rp=panelWidth(), wide=window.innerWidth>=900;
+  // 左上角的标题面板只挡住上半部分，按一半宽度算，让线圈的标注不被它盖住
+  stage3d.setInsets({r: rp>0 ? rp+16 : 0, b: dock ? dock.offsetHeight+24 : 0, t: 40, l: wide ? 190 : 0});
+}
+new ResizeObserver(fit).observe($('#app'));
+new ResizeObserver(updateInsets).observe(document.querySelector('.dock'));   // 讲解字幕行数变化时，重新计算底部高度
+
+/* ---------- 参数面板、负反馈环框图的开关 ---------- */
+function setPanel(open){ document.body.classList.toggle('panel-closed',!open); $('#b-panel').setAttribute('aria-pressed',open?'true':'false'); fit(); }
+function setLoop(open){ $('#loop').hidden=!open; $('#b-loop').setAttribute('aria-pressed',open?'true':'false'); }
+$('#b-panel').onclick=()=>setPanel(document.body.classList.contains('panel-closed'));
+$('#b-loop').onclick=()=>setLoop($('#loop').hidden);
+$('#b-loop-close').onclick=()=>setLoop(false);
+
+/* ---------- 舞台 ---------- */
+const FACE=126, PXMM=5.6, BR=46, CX=200, BASE_Y=470;
+const LANDS=[[48,10,26],[8,22,22],[42,95,30],[-18,-58,22],[45,-100,26],[-25,134,16],[62,60,18]];
+function proj(lat,lon,r){ const la=lat*Math.PI/180, lo=lon*Math.PI/180+r; return [Math.cos(la)*Math.sin(lo), -Math.sin(la), Math.cos(la)*Math.cos(lo)]; }
+function drawStage(){
+  const c=sctx, s=sim.s, o=sim.out, p=PARAMS.plant;
+  c.clearRect(0,0,SW,SH);
+  // 图纸网格
+  c.strokeStyle=T.grid; c.lineWidth=1; c.beginPath();
+  for(let gx=0; gx<=SW; gx+=20){ c.moveTo(gx+0.5,0); c.lineTo(gx+0.5,SH); }
+  for(let gy=0; gy<=SH; gy+=20){ c.moveTo(0,gy+0.5); c.lineTo(SW,gy+0.5); }
+  c.stroke();
+
+  const ballTop=FACE+s.x*1000*PXMM, cy=ballTop+BR;
+  // 底座阴影
+  const hgt=BASE_Y-(cy+BR), sh=clamp(1-hgt/320,0.15,1);
+  c.fillStyle=T.ink; c.globalAlpha=0.16*sh; c.beginPath(); c.ellipse(CX,BASE_Y-2,BR*(0.55+0.45*sh),6,0,0,Math.PI*2); c.fill(); c.globalAlpha=1;
+  // 底座、立柱、横臂
+  c.fillStyle=T.ink;
+  roundRect(c,50,BASE_Y,340,26,6); c.fill();
+  c.fillRect(332,40,22,BASE_Y-40);
+  roundRect(c,150,38,204,24,5); c.fill();
+  // 电磁铁外壳 + 线圈
+  const lvl=clamp(s.i/1.1,0,1);
+  c.fillStyle=T.steel; roundRect(c,150,60,100,62,6); c.fill();
+  c.save();
+  c.shadowColor=T.glow; c.shadowBlur=26*lvl;
+  c.fillStyle=mix(T.copper,T.glow,lvl*0.85); roundRect(c,158,67,84,46,4); c.fill();
+  c.restore();
+  c.strokeStyle=T.ink; c.globalAlpha=0.35; c.lineWidth=1; c.beginPath();
+  for(let y=70;y<112;y+=4){ c.moveTo(159,y+0.5); c.lineTo(241,y+0.5); } c.stroke(); c.globalAlpha=1;
+  c.fillStyle=T.steel; c.fillRect(185,120,30,6);           // 铁芯极面
+  c.fillStyle=T.ink; c.fillRect(193,126,14,5);             // 霍尔传感器
+  c.font='11px '+getFont(); c.fillStyle=T.muted; c.textAlign='left';
+  c.fillText('霍尔传感器',258,132); c.strokeStyle=T.muted; c.beginPath(); c.moveTo(208,129); c.lineTo(254,129); c.stroke();
+  c.fillText('线圈 '+s.i.toFixed(2)+' A',258,92);
+
+  // 磁感线
+  const gap=ballTop-FACE;
+  if(gap>3 && s.i>0.005){
+    const st=clamp(o.F/(p.m_kg*p.g_m_per_s2),0,1.6);
+    c.strokeStyle=T.field; c.lineWidth=1.6; c.setLineDash([4,5]); c.lineDashOffset=-phase;
+    c.globalAlpha=clamp(0.12+0.55*st,0.1,0.85);
+    for(let k=-2;k<=2;k++){
+      c.beginPath(); c.moveTo(CX+k*6,FACE+3);
+      c.quadraticCurveTo(CX+k*20, FACE+gap*0.55, CX+k*15, ballTop+2+Math.abs(k)*3); c.stroke();
+    }
+    c.setLineDash([]); c.globalAlpha=1;
+  }
+
+  // 标尺
+  const RX=104;
+  c.strokeStyle=T.muted; c.fillStyle=T.muted; c.lineWidth=1; c.font='10px '+getNumFont(); c.textAlign='right';
+  c.beginPath(); c.moveTo(RX+0.5,FACE); c.lineTo(RX+0.5,FACE+30*PXMM); c.stroke();
+  for(let mm=0;mm<=30;mm++){
+    const y=FACE+mm*PXMM, L=mm%5===0?8:4;
+    c.beginPath(); c.moveTo(RX-L,y+0.5); c.lineTo(RX,y+0.5); c.stroke();
+    if(mm%5===0) c.fillText(String(mm),RX-11,y+3.5);
+  }
+  c.fillText('mm',RX-4,FACE-8);
+  const ty=FACE+p.x0_m*1000*PXMM;
+  c.strokeStyle=T.ok; c.setLineDash([5,4]); c.beginPath(); c.moveTo(RX+4,ty+0.5); c.lineTo(CX-BR-6,ty+0.5); c.stroke(); c.setLineDash([]);
+  c.fillStyle=T.ok; c.textAlign='left'; c.font='11px '+getFont(); c.fillText('目标',RX+6,ty-5);
+  if(ballTop<FACE+31*PXMM){ c.fillStyle=T['t-x']; c.beginPath(); c.moveTo(RX+1,ballTop); c.lineTo(RX+9,ballTop-5); c.lineTo(RX+9,ballTop+5); c.closePath(); c.fill(); }
+
+  // 地球仪
+  c.save(); c.beginPath(); c.arc(CX,cy,BR,0,Math.PI*2); c.clip();
+  c.fillStyle=T.ocean; c.fillRect(CX-BR,cy-BR,BR*2,BR*2);
+  c.fillStyle=T.land;
+  for(const [la,lo,rr] of LANDS){
+    const ctr=proj(la,lo,rot); if(ctr[2]<0.12) continue;
+    c.beginPath();
+    for(let q=0;q<=20;q++){
+      const be=q/20*Math.PI*2, r=rr*Math.PI/180, la0=la*Math.PI/180;
+      const la1=Math.asin(Math.sin(la0)*Math.cos(r)+Math.cos(la0)*Math.sin(r)*Math.cos(be));
+      const lo1=lo*Math.PI/180+Math.atan2(Math.sin(be)*Math.sin(r)*Math.cos(la0), Math.cos(r)-Math.sin(la0)*Math.sin(la1));
+      const pt=proj(la1*180/Math.PI, lo1*180/Math.PI, rot);
+      let X=pt[0], Y=pt[1]; if(pt[2]<0){ const nrm=Math.hypot(X,Y)||1; X/=nrm; Y/=nrm; }
+      q?c.lineTo(CX+X*BR, cy+Y*BR):c.moveTo(CX+X*BR, cy+Y*BR);
+    }
+    c.fill();
+  }
+  c.strokeStyle='rgba(255,255,255,0.32)'; c.lineWidth=1;
+  for(const la of [-60,-30,0,30,60]){ const y=-Math.sin(la*Math.PI/180)*BR, hw=Math.cos(la*Math.PI/180)*BR; c.beginPath(); c.moveTo(CX-hw,cy+y); c.lineTo(CX+hw,cy+y); c.stroke(); }
+  for(let k=0;k<6;k++){
+    const lon=k*30; c.beginPath(); let started=false;
+    for(let q=-12;q<=12;q++){ const pt=proj(q*7.5,lon,rot); if(pt[2]<0){ started=false; continue; } const X=CX+pt[0]*BR, Y=cy+pt[1]*BR; started?c.lineTo(X,Y):c.moveTo(X,Y); started=true; }
+    c.stroke();
+  }
+  let gr=c.createRadialGradient(CX-BR*0.4,cy-BR*0.45,2,CX-BR*0.4,cy-BR*0.45,BR*1.1);
+  gr.addColorStop(0,'rgba(255,255,255,0.5)'); gr.addColorStop(0.5,'rgba(255,255,255,0)'); c.fillStyle=gr; c.fillRect(CX-BR,cy-BR,BR*2,BR*2);
+  gr=c.createRadialGradient(CX,cy,BR*0.55,CX,cy,BR); gr.addColorStop(0,'rgba(0,0,0,0)'); gr.addColorStop(1,'rgba(0,0,0,0.38)'); c.fillStyle=gr; c.fillRect(CX-BR,cy-BR,BR*2,BR*2);
+  c.restore();
+  c.fillStyle=T.steel; c.beginPath(); c.ellipse(CX,ballTop+3,9,4,0,0,Math.PI*2); c.fill();   // 顶部的小磁铁
+  if(sim.massRatio>0){
+    c.fillStyle=T.brass; c.beginPath(); c.arc(CX+BR*0.62,cy+BR*0.62,9,0,Math.PI*2); c.fill();
+    c.fillStyle=T.ink; c.font='600 12px '+getFont(); c.textAlign='left'; c.fillText('+10 g',CX+BR*0.62+14,cy+BR*0.62+18);
+  }
+
+  // 推力箭头
+  if(sim.t < sim.pushUntil + 0.06){
+    const ax=CX+BR+26; c.strokeStyle=T.ink; c.fillStyle=T.ink; c.lineWidth=3;
+    c.beginPath(); c.moveTo(ax,cy-36); c.lineTo(ax,cy+6); c.stroke();
+    c.beginPath(); c.moveTo(ax-7,cy+2); c.lineTo(ax+7,cy+2); c.lineTo(ax,cy+14); c.closePath(); c.fill();
+    c.font='600 12px '+getFont(); c.textAlign='left'; c.fillText('推 0.3 N',ax+10,cy-14);
+  }
+  // 状态标注
+  c.textAlign='center'; c.font='600 13px '+getFont();
+  if(sim.damaged){
+    flash+=1; c.fillStyle=T.bad; c.globalAlpha=0.25+0.2*Math.sin(flash*0.3); roundRect(c,146,56,108,70,8); c.fill(); c.globalAlpha=1;
+    c.fillText('三极管击穿',CX,24);
+    c.font='11px '+getFont(); c.fillStyle=T.muted;
+    if(sim.spike) c.fillText('理论尖峰 L·Δi/Δt ≈ '+(sim.spike.V/1000).toFixed(0)+' kV，被钳在 60 V 击穿',CX+20,SH-6);
+  } else if(!sim.drive){ c.fillStyle=T.muted; c.fillText('驱动已关断',CX,24); }
+  else if(!sim.feedback){ c.fillStyle=T.bad; c.fillText('反馈已断开，电流固定 0.6 A',CX,24); }
+}
+function roundRect(c,x,y,w,h,r){ c.beginPath(); c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r); c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+function hex(h){ h=h.replace('#',''); if(h.length===3) h=h.split('').map(ch=>ch+ch).join(''); const n=parseInt(h,16); return [(n>>16)&255,(n>>8)&255,n&255]; }
+function mix(a,b,t){ const A=hex(a),B=hex(b); return `rgb(${A.map((v,k)=>Math.round(v+(B[k]-v)*t)).join(',')})`; }
+let _font='', _num='';
+function getFont(){ return _font||(_font=getComputedStyle(document.documentElement).getPropertyValue('--font-ui')); }
+function getNumFont(){ return _num||(_num=getComputedStyle(document.documentElement).getPropertyValue('--font-num')); }
+
+/* ---------- 示波器 ---------- */
+const LANES=[
+  {key:'x', min:4, max:18, ticks:[5,10,15], unit:'mm', color:'t-x', frac:0.44, target:10},
+  {key:'i', min:0, max:1.2, ticks:[0,0.6,1.2], unit:'A', color:'t-i', frac:0.28},
+  {key:'v', min:-4, max:12, ticks:[0,6,12], unit:'V', color:'t-v', frac:0.28}
+];
+const OV_KEY={x:'x_mm', i:'i_A', v:'v_coil_V'};
+// 对照时，间隙和电流两栏按电路曲线的实际范围自动缩放，细小的差别也看得清
+function niceTicks(lo,hi){ const raw=(hi-lo)/3, p=Math.pow(10,Math.floor(Math.log10(raw))), m=raw/p, step=(m<1.5?1:m<3?2:m<7?5:10)*p;
+  const out=[]; for(let v=Math.ceil(lo/step)*step; v<=hi+1e-9; v+=step) out.push(+v.toFixed(6)); return out; }
+function laneFor(ln,ov){
+  if(!ov||ln.key==='v') return ln;
+  const arr=ov.data[OV_KEY[ln.key]]; let lo=Infinity, hi=-Infinity;
+  for(const v of arr){ if(v<lo) lo=v; if(v>hi) hi=v; }
+  if(ln.key==='x'){ lo=Math.max(lo,0); hi=Math.min(hi,46); }
+  const span=Math.max(hi-lo, ln.key==='x'?2:0.2), mid=(lo+hi)/2;
+  lo=mid-span*0.62; hi=mid+span*0.62;
+  return {...ln, min:lo, max:hi, ticks:niceTicks(lo,hi)};
+}
+// 对照时，示波器锁定在"动作前后"的时间窗里：电路曲线一次画全，网页曲线随时间画上去
+function ovWindow(ov){ const d=ov.data, dur=d.x_mm.length*d.dt; return {t0:ov.base, span:clamp(dur,0.3,2)}; }
+function drawScope(){
+  const c=kctx, W=scopeW, H=SCOPE_H, L=40, R=8, TOP=4, BOT=20, GAP=10;
+  if(!c) return;
+  c.clearRect(0,0,W,H);
+  const ov=circ.overlay, win=ov?ovWindow(ov):null;
+  const pw=W-L-R, ph=H-TOP-BOT-GAP*2, span=win?win.span:2, t0=win?win.t0:sim.t-2, t1=t0+span;
+  const X=(t)=>L+(t-t0)/span*pw;
+  let y0=TOP;
+  c.font='10.5px '+getNumFont();
+  for(const base of LANES){
+    const ln=laneFor(base,ov);
+    const h=ph*ln.frac, Y=(v)=>y0+h-(v-ln.min)/(ln.max-ln.min)*h;
+    c.fillStyle=T.grid; c.fillRect(L,y0,pw,h);
+    c.strokeStyle=T.line; c.lineWidth=1; c.beginPath();
+    for(let k=0;k<=8;k++){ const gx=Math.round(L+pw*k/8)+0.5; c.moveTo(gx,y0); c.lineTo(gx,y0+h); }
+    for(const tv of ln.ticks){ const gy=Math.round(Y(tv))+0.5; c.moveTo(L,gy); c.lineTo(L+pw,gy); }
+    c.stroke();
+    c.fillStyle=T.muted; c.textAlign='right';
+    for(const tv of ln.ticks) c.fillText(String(tv),L-6,Y(tv)+3.5);
+    c.textAlign='left'; c.fillText(ln.unit,L+4,y0+11);
+    if(ln.target!==undefined && ln.target>=ln.min && ln.target<=ln.max){ c.strokeStyle=T.ok; c.setLineDash([5,4]); c.beginPath(); c.moveTo(L,Y(ln.target)+0.5); c.lineTo(L+pw,Y(ln.target)+0.5); c.stroke(); c.setLineDash([]); }
+    // 曲线
+    c.save(); c.beginPath(); c.rect(L,y0,pw,h); c.clip();
+    c.strokeStyle=T[ln.color]; c.lineWidth=1.8; c.lineJoin='round'; c.beginPath();
+    let first=true, below=null, above=null;
+    const lo=ln.min-(ln.max-ln.min)*0.05, hi=ln.max+(ln.max-ln.min)*0.05;
+    eachSample((t,x,i,v)=>{
+      if(t<t0||t>t1) return; const val= ln.key==='x'?x : ln.key==='i'?i : v;
+      if(val<ln.min) below=Math.min(below??val,val); if(val>ln.max) above=Math.max(above??val,val);
+      const px=X(t), py=Y(clamp(val,lo,hi));
+      first?c.moveTo(px,py):c.lineTo(px,py); first=false;
+    });
+    c.stroke();
+    // 电路仿真（LTspice）的曲线：白色虚线
+    if(ov){
+      const arr=ov.data[OV_KEY[ln.key]], dt=ov.data.dt;
+      c.strokeStyle='rgba(231,237,246,0.85)'; c.lineWidth=1.6; c.setLineDash([5,4]); c.beginPath();
+      let f=true;
+      for(let k=0;k<arr.length;k++){ const tw=ov.base+k*dt; if(tw<t0||tw>t1) continue;
+        const px=X(tw), py=Y(clamp(arr[k],lo,hi)); f?c.moveTo(px,py):c.lineTo(px,py); f=false; }
+      c.stroke(); c.setLineDash([]);
+    }
+    c.restore();
+    if(ln.key==='v' && ov && ov.data.v_collector_peak_V>40){ c.fillStyle=T.bad; c.textAlign='right'; c.fillText('电路集电极尖峰约 '+Math.round(ov.data.v_collector_peak_V)+' V',L+pw-4,y0+h-5); }
+    else if(below!==null && ln.key==='v'){ c.fillStyle=T.bad; c.textAlign='right'; c.fillText('最低 '+below.toFixed(0)+' V',L+pw-4,y0+h-5); }
+    if(above!==null && ln.key==='x'){ c.fillStyle=T.bad; c.textAlign='right'; c.fillText('超出量程',L+pw-4,y0+h-5); }
+    y0+=h+GAP;
+  }
+  c.fillStyle=T.muted; c.textAlign='center';
+  if(ov){
+    // 动作时刻的竖线，时间轴改成"动作后多少秒"
+    const xa=X(ov.tAction);
+    if(xa>=L&&xa<=L+pw){ c.strokeStyle=T.copper; c.setLineDash([3,3]); c.beginPath(); c.moveTo(xa+0.5,TOP); c.lineTo(xa+0.5,H-BOT); c.stroke(); c.setLineDash([]); }
+    for(let k=0;k<=4;k++){ const rel=t0+span*k/4-ov.tAction; c.fillText((Math.abs(rel)<1e-9?'动作':(rel>0?'+':'−')+Math.abs(rel).toFixed(2)+' s'), L+pw*k/4, H-5); }
+  } else {
+    for(let k=0;k<=4;k++){ c.fillText((k===4?'现在':'−'+(2-k*0.5).toFixed(1)+' s'), L+pw*k/4, H-5); }
+  }
+}
+
+/* ---------- 电路对照：不对照 / 预存电路 / 实时电路 ----------
+   预存：读 data/circuit.js 里事先用 LTspice 跑好的波形，离线可用。
+   实时：把当前参数发给本地服务 sim/server.py，让它当场跑一遍 LTspice（约 5 秒）。 */
+const CIRC=window.MAGLEV_CIRCUIT||null;
+// 实时电路只能用在"由本地服务 sim/server.py 打开的网页"上（出于安全考虑，服务不接受别处来的请求）
+const ON_HTTP=location.protocol.startsWith('http');
+const KIND_NAMES={release:'放手',push:'推一下',load:'加重物',drive_off:'关断驱动'};
+const circ={mode:'off', overlay:null, server:null, busy:false, lastAction:'release', pingTimer:0};
+function circSetStatus(cls,text){ const el=$('#circ-status'); el.className='circ-status'+(cls?' '+cls:''); el.textContent=text; }
+function circDefaultStatus(){
+  if(circ.overlay||circ.busy) return;
+  if(circ.mode==='off') circSetStatus('','打开"预存电路"或"实时电路"后，做"放手、推一下、加重物、关断驱动"时会叠加电路仿真曲线。');
+  else if(circ.mode==='stored') CIRC ? circSetStatus('',`已加载 ${Object.keys(CIRC.scenarios).length} 个预存场景（${CIRC.source}）。现在做一个实验试试。`)
+                                     : circSetStatus('bad','没有找到预存的电路数据 demo/data/circuit.js，请先在项目文件夹里运行 python sim/export_web.py。');
+  else if(circ.server===true) circSetStatus('ok','已连接本地服务。做实验时，LTspice 会按当前参数重算一遍（约 6 秒）。');
+  else if(circ.server===false) circSetStatus('bad','实时电路要从本地服务打开网页：在项目文件夹里运行 python sim/server.py --open，它会自动打开 http://127.0.0.1:8766/。');
+  else circSetStatus('','正在检测本地服务…');
+}
+function syncCircUi(){
+  document.querySelectorAll('#circ-mode [data-circ]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.circ===circ.mode?'true':'false'));
+  document.querySelector('#circ-mode [data-circ="stored"]').disabled=!CIRC;
+  $('#b-redo').hidden=circ.mode==='off';
+  circDefaultStatus();
+}
+function setOverlay(o){
+  o.base=o.tAction-o.data.action_t; circ.overlay=o;
+  $('#lg-circ').hidden=false;
+  $('#scope-title').textContent=`示波器 · 对照：${o.title}（${o.source==='stored'?'预存':'实时'} LTspice）`;
+  const m=o.data.metrics||{}, parts=[];
+  if(m.settling_time_s!=null) parts.push(`电路调节时间 ${m.settling_time_s.toFixed(3)} s`);
+  if(m.max_abs_displacement_mm!=null) parts.push(`最大偏移 ${m.max_abs_displacement_mm.toFixed(2)} mm`);
+  if(m.steady_state_error_mm!=null) parts.push(`稳态误差 ${m.steady_state_error_mm.toFixed(3)} mm`);
+  const state={stable:'稳定',fallen:'落地',falling:'正在掉落',stuck:'被吸住',damaged:'损坏',oscillation:'振荡',unsettled:'未稳定'}[o.data.final_state]||o.data.final_state;
+  const head=(o.source==='stored'?'白色虚线是事先用 LTspice 跑好的电路仿真':`白色虚线是 LTspice 刚刚按当前参数算出的电路仿真（用时 ${(o.data.elapsed_s||0).toFixed(1)} s）`)+`，结果：${state}。`;
+  circSetStatus(o.notes.length?'warn':'ok', head+(parts.length?parts.join('，')+'。':'')+(o.notes.length?' 注意：'+o.notes.join('；')+'。':''));
+}
+function clearOverlay(){ circ.overlay=null; $('#lg-circ').hidden=true; $('#scope-title').textContent='示波器 · 最近 2 秒'; circDefaultStatus(); }
+function setCircMode(m){
+  circ.mode=m; clearOverlay();
+  try{ localStorage.setItem('maglev-circuit',m); }catch(err){}
+  clearInterval(circ.pingTimer);
+  if(m==='live'){ pingServer(); circ.pingTimer=setInterval(()=>{ if(circ.server!==true) pingServer(); },5000); }
+  syncCircUi();
+}
+async function pingServer(){
+  if(!ON_HTTP){ circ.server=false; circDefaultStatus(); return; }   // 双击打开的网页用不了实时电路
+  try{
+    const ctl=new AbortController(), tm=setTimeout(()=>ctl.abort(),1500);
+    const r=await fetch('/api/ping',{signal:ctl.signal,cache:'no-store'}); clearTimeout(tm);
+    const j=await r.json(); circ.server=!!(r.ok&&j.ok&&j.ltspice);
+  }catch(err){ circ.server=false; }
+  circDefaultStatus();
+}
+const sameGains=(a,b)=>Math.abs(a.Kp-b.Kp)<1e-6 && Math.abs(a.Ki-b.Ki)<1e-6 && Math.abs(a.Kd-b.Kd)<6e-4 && a.integral_on===b.integral_on && a.diode===b.diode;
+// 每次做实验时调用：pre 是动作之前的状态，用来判断和电路场景的起点是否一致
+function circuitOnAction(name,pre){
+  if(circ.mode==='off') return;
+  const kind= name==='release'?'release' : name==='push'?'push' : (name==='weight'&&sim.massRatio>0)?'load' : (name==='drive'&&!sim.drive)?'drive_off' : null;
+  if(!kind){ if(['weight','feedback','drive','diode','integral'].includes(name)) clearOverlay(); return; }
+  circ.lastAction=kind;
+  const req={action:kind, Kp:sim.gain.Kp, Ki:sim.gain.Ki, Kd:sim.gain.Kd, integral_on:sim.integral, diode:sim.diode};
+  const notes=[], x0=PARAMS.plant.x0_m;
+  if(!pre.feedback) notes.push('反馈处于断开状态，电路里没有这种情况');
+  if(kind!=='release' && (Math.abs(pre.x-x0)>0.15e-3 || Math.abs(pre.v)>0.005)) notes.push('动作前球还没稳在 10 mm');
+  if(pre.mass>0) notes.push('动作前已经挂着重物');
+  if(circ.mode==='stored') showStored(kind,req,sim.t,notes); else requestLive(kind,req,sim.t,notes);
+}
+function showStored(kind,req,tAction,notes){
+  if(!CIRC){ circDefaultStatus(); return; }
+  let best=null;
+  for(const sc of Object.values(CIRC.scenarios)){
+    if(sc.request.action!==kind || !sameGains(req,sc.request)) continue;
+    const d=Math.abs(req.Kd-sc.request.Kd); if(!best||d<best.d) best={sc,d};
+  }
+  if(!best){ clearOverlay(); circSetStatus('warn',`预存数据里没有当前这组参数的"${KIND_NAMES[kind]}"。切到"实时电路"，可以让电路按当前参数重算。`); return; }
+  if(best.d>1e-6) notes.push(`预存曲线用的 Kd = ${best.sc.request.Kd.toFixed(4)} s，和当前略有不同`);
+  if(CIRC.params_digest && window.MAGLEV_PARAMS_DIGEST && CIRC.params_digest!==window.MAGLEV_PARAMS_DIGEST) notes.push('预存数据是用旧参数生成的，请重新运行 python sim/export_web.py');
+  setOverlay({source:'stored', title:best.sc.title, data:best.sc, tAction, notes});
+}
+async function requestLive(kind,req,tAction,notes){
+  if(circ.server!==true){ await pingServer(); if(circ.server!==true) return; }
+  if(circ.busy){ circSetStatus('warn','电路还在仿真上一个动作，请稍候再试。'); return; }
+  circ.busy=true; circ.overlay=null; $('#lg-circ').hidden=true;
+  circSetStatus('',`电路仿真中：${KIND_NAMES[kind]}（Kp ${req.Kp}，Ki ${req.Ki} /s，Kd ${req.Kd} s），大约需要 6 秒…`);
+  try{
+    const r=await fetch('/api/simulate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(req)});
+    const j=await r.json().catch(()=>({ok:false,error:'本地服务返回的内容无法解析'}));
+    if(!r.ok||!j.ok) throw new Error(j.busy?'本地服务正忙，请稍候再试':(j.error||('HTTP '+r.status)));
+    circ.busy=false;
+    if(circ.mode==='live') setOverlay({source:'live', title:j.title||KIND_NAMES[kind], data:j, tAction, notes});
+  }catch(err){
+    circ.busy=false;
+    circSetStatus('bad','电路仿真没有完成：'+String(err.message||err).split('\n')[0]);
+    if(err instanceof TypeError) circ.server=false;   // 网络错误，多半是服务被关掉了
+  }
+}
+// "重做并对照"：重复上一次的实验（推一下就再推一下，其余都从放手重新开始）
+function redoCompare(){ if(circ.mode==='off') return; run(circ.lastAction==='push'?'push':'release'); }
+
+/* ---------- 稳定区小图 ---------- */
+function drawMap(){
+  if(!mctx) return;
+  const c=mctx, W=MW, H=MH, L=40, B=28, TP=8, RP=10, pw=W-L-RP, ph=H-TP-B;
+  const KPM=10, KDM=0.15, X=(kp)=>L+kp/KPM*pw, Y=(kd)=>TP+ph-kd/KDM*ph;
+  const {a,c:cc}=sim.D, Ki=sim.integral?sim.gain.Ki:0, kp0=a/cc;
+  c.clearRect(0,0,W,H);
+  c.fillStyle=T.grid; c.fillRect(L,TP,pw,ph);
+  // 稳定区
+  const pts=[]; for(let k=0;k<=120;k++){ const kp=kp0+(KPM-kp0)*k/120; const kd= Ki>0 ? Ki/(cc*kp-a) : 0; pts.push([kp,Math.min(kd,KDM)]); }
+  c.beginPath(); c.moveTo(X(kp0),Y(KDM)); for(const [kp,kd] of pts) c.lineTo(X(kp),Y(kd)); c.lineTo(X(KPM),Y(KDM)); c.closePath();
+  c.fillStyle=T.ok; c.globalAlpha=0.2; c.fill(); c.globalAlpha=1;
+  c.strokeStyle=T.ok; c.lineWidth=1.6; c.beginPath(); c.moveTo(X(kp0),Y(KDM)); for(const [kp,kd] of pts) c.lineTo(X(kp),Y(kd)); c.stroke();
+  c.fillStyle=T.ok; c.font='600 12px '+getFont(); c.textAlign='left'; c.fillText('稳定',X(6.6),Y(0.112));
+  c.fillStyle=T.bad; c.fillText('不稳定',X(0.15),Y(0.02));
+  // 坐标轴
+  c.fillStyle=T.muted; c.font='10.5px '+getNumFont(); c.textAlign='center';
+  for(const kp of [0,2,4,6,8,10]) c.fillText(String(kp),X(kp),H-B+14);
+  c.fillText('Kp',L+pw/2,H-3);
+  c.textAlign='right'; for(const kd of [0,0.05,0.1,0.15]) c.fillText(kd.toFixed(2),L-5,Y(kd)+3.5);
+  c.save(); c.translate(10,TP+ph/2); c.rotate(-Math.PI/2); c.textAlign='center'; c.fillText('Kd（s）',0,0); c.restore();
+  // 当前点
+  const px=X(clamp(sim.gain.Kp,0,KPM)), py=Y(clamp(sim.gain.Kd,0,KDM));
+  c.fillStyle=T.panel; c.beginPath(); c.arc(px,py,7,0,Math.PI*2); c.fill();
+  c.fillStyle=sim.feedback?T.ink:T.muted; c.beginPath(); c.arc(px,py,4.5,0,Math.PI*2); c.fill();
+  if(!sim.feedback){ c.fillStyle=T.bad; c.font='600 12px '+getFont(); c.textAlign='center'; c.fillText('反馈已断开，没有参数可言',L+pw/2,TP+16); }
+}
+
+/* ---------- 读数、状态、框图 ---------- */
+const el={x:$('#r-x'),dx:$('#r-dx'),i:$('#r-i'),v:$('#r-v'),p:$('#r-p'),status:$('#status'),
+  ref:$('#v-ref'),pid:$('#v-pid'),drv:$('#v-drv'),coil:$('#v-coil'),diode:$('#v-diode'),force:$('#v-force'),ball:$('#v-ball'),hall:$('#v-hall'),
+  gDrv:$('#g-drv'),gCoil:$('#g-coil'),gDiode:$('#g-diode'),gPid:$('#g-pid'),gHall:$('#g-hall'),wFb:$('#w-fb'),wDrv:$('#w-drv'),cut:$('#cutmark')};
+function status(){
+  if(sim.damaged) return ['bad','三极管击穿'];
+  if(sim.fallen) return ['bad','已掉落'];
+  if(sim.stuck) return ['bad','被吸住'];
+  let a1=[1e9,-1e9], a2=[1e9,-1e9];
+  const tn=sim.t;
+  eachSample((t,x)=>{ if(t>tn-0.2){ a2[0]=Math.min(a2[0],x); a2[1]=Math.max(a2[1],x); } else if(t>tn-0.4){ a1[0]=Math.min(a1[0],x); a1[1]=Math.max(a1[1],x); } });
+  const amp2=a2[1]-a2[0], amp1=a1[1]-a1[0], dev=sim.s.x*1000-PARAMS.plant.x0_m*1000;
+  if(!sim.feedback) return ['bad','失去平衡'];
+  const since=tn-Math.max(sim.lastEventT,sim.pushUntil);   // 刚操作过的一小段时间里，摆幅变大是正常的
+  if(since>0.35 && amp2>0.3 && amp1>0 && amp2>amp1*1.15) return ['bad','振荡加剧'];
+  if(Math.max(amp1,amp2)<0.08 && since>0.05){
+    if(Math.abs(dev)<0.05) return ['ok','稳定悬浮'];
+    return ['ok','稳定，'+(dev>0?'偏低 ':'偏高 ')+Math.abs(dev).toFixed(2)+' mm'];
+  }
+  return ['warn','恢复中'];
+}
+let lastUi=0;
+function updateUi(now){
+  if(now-lastUi<70) return; lastUi=now;
+  const s=sim.s, o=sim.out, d=PARAMS.driver, x0=PARAMS.plant.x0_m;
+  const diodeOn = sim.diode && o.Vc<0 && s.i>1e-4;
+  const Pt = diodeOn ? 0 : Math.max(0,(d.Vs_V-o.Vc)*s.i);
+  el.x.textContent=(s.x*1000).toFixed(2)+' mm';
+  el.dx.textContent=sg((s.x-x0)*1000,2)+' mm';
+  el.i.textContent=s.i.toFixed(3)+' A';
+  el.v.textContent=nz(o.Vc,2)+' V';
+  el.p.textContent=Pt.toFixed(1)+' W';
+  const [cls,txt]=status(); el.status.className='pill '+cls; el.status.textContent=txt;
+  el.ref.textContent=`10 mm → ${sim.D.yref.toFixed(2)} V`;
+  el.pid.textContent=sim.feedback?`e = ${sg(o.e,3)} V，u = ${sg(o.u,2)} V`:'输出 u = 0（反馈断开）';
+  const sat = sim.drive && !sim.damaged && o.Vc>=sim.D.Vhigh-1e-6;
+  el.drv.textContent = sim.damaged?'三极管已击穿' : !sim.drive?'已关断' : `i_cmd = ${o.icmd.toFixed(3)} A`+(sat?'　饱和':'');
+  el.gDrv.setAttribute('class','blk'+(sim.damaged?' bad':(!sim.drive?' dim':(sat?' sat':''))));
+  el.coil.textContent=`i = ${s.i.toFixed(3)} A，V = ${nz(o.Vc,1)} V`;
+  el.gCoil.setAttribute('class','blk'+(s.i>0.05?' hot':''));
+  el.diode.textContent=!sim.diode?'已拆除':(diodeOn?'导通，电流慢慢衰减':'截止');
+  el.gDiode.setAttribute('class','blk'+(!sim.diode?' dim':(diodeOn?' on hot':'')));
+  el.force.textContent=`F = ${o.F.toFixed(3)} N（mg = ${(o.m*PARAMS.plant.g_m_per_s2).toFixed(3)} N）`;
+  el.ball.textContent=`x = ${(s.x*1000).toFixed(2)} mm，v = ${sg(s.v*1000,0)} mm/s`;
+  el.hall.textContent=`y = ${(PARAMS.sensor.ks_V_per_m*s.x).toFixed(3)} V`;
+  el.gPid.setAttribute('class','blk'+(sim.feedback?'':' dim'));
+  el.wFb.setAttribute('class','wire flow'+(sim.feedback?'':' cut'));
+  el.cut.setAttribute('visibility',sim.feedback?'hidden':'visible');
+  el.wDrv.setAttribute('class','wire flow'+((sim.drive&&!sim.damaged)?'':' off'));
+  if(sim.damaged && $('#theory').textContent!=='理论：没有驱动电流') updateTheory();
+}
+
+/* ---------- 三维舞台（three.js r147，单位：毫米，y 轴向上，电磁铁极面在 y = 0）
+   风格：深空展台。程序生成的星云天空和闪烁星空做背景，设备放在悬浮于黑暗中的亮面圆台上；
+   顶部聚光灯打出光池，背后蓝紫色轮廓光勾边，线圈通电时发暖铜色光；磁感线、粒子、火花用叠加发光。 ---------- */
+const LAND=[
+  [[-167,66],[-156,71],[-140,70],[-128,70],[-110,73],[-95,72],[-85,70],[-80,64],[-90,57],[-78,52],[-65,60],[-60,55],[-56,52],[-66,45],[-70,42],[-76,38],[-76,35],[-81,31],[-80,26],[-82,25],[-84,30],[-90,30],[-97,27],[-97,22],[-92,18],[-87,21],[-88,16],[-84,11],[-79,9],[-83,8],[-86,12],[-92,14],[-96,16],[-105,20],[-106,23],[-112,29],[-110,23],[-115,30],[-118,34],[-124,40],[-124,48],[-130,55],[-138,59],[-147,61],[-153,58],[-160,58],[-165,62]],
+  [[-79,9],[-75,11],[-70,12],[-62,11],[-55,6],[-50,1],[-44,-2],[-35,-6],[-37,-12],[-39,-18],[-41,-22],[-48,-26],[-52,-32],[-58,-36],[-62,-40],[-65,-45],[-68,-50],[-70,-55],[-74,-52],[-74,-44],[-73,-37],[-71,-30],[-70,-20],[-76,-14],[-80,-6],[-81,-2],[-78,2],[-77,7]],
+  [[-10,36],[-9,43],[-2,44],[-5,48],[2,51],[8,54],[8,57],[5,62],[14,67],[22,70],[30,70],[42,67],[55,69],[70,73],[80,73],[100,77],[115,74],[130,72],[140,72],[160,70],[170,70],[180,66],[178,62],[163,60],[160,54],[156,51],[150,59],[140,58],[135,54],[141,48],[133,43],[129,40],[127,35],[122,40],[120,36],[122,31],[120,25],[110,20],[108,16],[109,12],[105,9],[103,4],[104,1],[100,7],[98,10],[97,16],[92,21],[88,22],[80,15],[77,8],[73,17],[70,22],[66,25],[57,26],[56,23],[52,17],[43,13],[39,21],[35,28],[34,31],[36,36],[27,37],[26,40],[23,38],[20,40],[16,38],[12,44],[9,44],[3,43],[-2,37],[-6,36]],
+  [[-17,21],[-16,28],[-10,30],[-6,36],[3,37],[10,37],[11,33],[20,31],[25,32],[32,31],[34,28],[37,22],[39,16],[43,12],[51,12],[48,5],[42,-1],[40,-10],[40,-16],[35,-22],[33,-28],[27,-34],[20,-35],[18,-32],[14,-24],[12,-17],[13,-9],[9,-1],[9,4],[5,6],[-3,5],[-8,4],[-13,8],[-17,13]],
+  [[114,-22],[114,-26],[115,-34],[118,-35],[124,-33],[131,-31],[137,-35],[140,-38],[147,-38],[150,-37],[153,-32],[153,-26],[146,-19],[142,-11],[141,-17],[136,-12],[131,-11],[126,-14],[122,-18]],
+  [[-5,50],[1,51],[0,53],[-3,56],[-5,58],[-6,55],[-5,52]],
+  [[130,31],[135,34],[140,36],[141,40],[142,43],[145,44],[140,41],[136,36],[132,34]],
+  [[44,-25],[47,-25],[50,-16],[49,-12],[44,-16]],
+  [[95,5],[105,-6],[106,-6],[98,2]],
+  [[109,1],[117,7],[119,4],[116,-4],[110,-3]],
+  [[131,-1],[141,-3],[150,-10],[141,-9],[136,-5]],
+  [[172,-35],[178,-38],[174,-41],[168,-46],[172,-42]]
+];
+const ICE=[
+  [[-55,60],[-43,60],[-35,66],[-22,70],[-20,77],[-18,81],[-35,83],[-60,82],[-68,77],[-58,75],[-54,68]],
+  [[-180,-70],[180,-70],[180,-90],[-180,-90]]
+];
+
+function createStage3D(host,labelHost){
+  const TH=window.THREE;
+  if(!TH||!TH.WebGLRenderer) return null;
+  if(TH.ColorManagement) TH.ColorManagement.legacyMode=false;   // 颜色按 sRGB 换算，否则整体发灰
+  let renderer;
+  try{ renderer=new TH.WebGLRenderer({antialias:true,powerPreference:'high-performance'}); }catch(err){ console.warn('WebGL 不可用，改用平面舞台',err); return null; }
+  renderer.setPixelRatio(Math.min(2,window.devicePixelRatio||1));
+  renderer.outputEncoding=TH.sRGBEncoding;
+  renderer.toneMapping=TH.ACESFilmicToneMapping; renderer.toneMappingExposure=1.15;
+  renderer.shadowMap.enabled=true; renderer.shadowMap.type=TH.PCFSoftShadowMap;
+  renderer.setClearColor(0x02040a,1);
+  const cv=renderer.domElement; cv.className='gl'; cv.tabIndex=0;
+  cv.setAttribute('aria-label','可拖动旋转的三维磁悬浮地球仪模型');
+  host.prepend(cv);
+
+  const scene=new TH.Scene();
+  scene.fog=new TH.FogExp2(0x03060d,0.0005);
+  const cam=new TH.PerspectiveCamera(30,1,5,9000);
+  const V=(x,y,z)=>new TH.Vector3(x,y,z);
+  const R=30, BASE_TOP=-105, PED_TOP=BASE_TOP-15.2;
+  let seed=20261124; const rnd=()=>(seed=(seed*16807)%2147483647)/2147483647;   // 固定种子，每次打开星空都一样
+  const ADD=TH.AdditiveBlending;
+
+  // ---------- 贴图（全部用画布现场生成，不需要额外文件） ----------
+  const canvasTex=(w,h,draw,srgb=true)=>{ const c=document.createElement('canvas'); c.width=w; c.height=h; draw(c.getContext('2d'),w,h); const t=new TH.CanvasTexture(c); if(srgb) t.encoding=TH.sRGBEncoding; return t; };
+  const radial=(stops)=>canvasTex(128,128,(g)=>{ const gr=g.createRadialGradient(64,64,0,64,64,64); stops.forEach(([o,c])=>gr.addColorStop(o,c)); g.fillStyle=gr; g.fillRect(0,0,128,128); },false);
+  const dotTex=radial([[0,'rgba(255,255,255,1)'],[0.35,'rgba(255,255,255,0.55)'],[1,'rgba(255,255,255,0)']]);
+  const softTex=radial([[0,'rgba(255,255,255,0.9)'],[0.25,'rgba(255,255,255,0.35)'],[1,'rgba(255,255,255,0)']]);
+  const blobTex=radial([[0,'rgba(0,0,0,0.75)'],[1,'rgba(0,0,0,0)']]);
+  const coilTex=canvasTex(8,64,(g)=>{ for(let y=0;y<64;y+=4){ g.fillStyle='#c9814c'; g.fillRect(0,y,8,2); g.fillStyle='#7f421c'; g.fillRect(0,y+2,8,2); } });
+
+  // 星云天空：沿一条倾斜的"银河带"分布的柔光团 + 细密星尘
+  const skyTex=canvasTex(2048,1024,(g,W,H)=>{
+    const bg=g.createLinearGradient(0,0,0,H); bg.addColorStop(0,'#02030a'); bg.addColorStop(0.5,'#050914'); bg.addColorStop(1,'#020308');
+    g.fillStyle=bg; g.fillRect(0,0,W,H);
+    g.globalCompositeOperation='lighter';
+    const band=(u)=>H*(0.52+0.16*Math.sin(u*Math.PI*2+0.9));
+    const cloud=(x,y,r,col,a)=>{ for(const dx of [-W,0,W]){ const cx=x+dx; if(cx+r<0||cx-r>W) continue;
+      const gr=g.createRadialGradient(cx,y,0,cx,y,r); gr.addColorStop(0,`rgba(${col},${a})`); gr.addColorStop(0.5,`rgba(${col},${a*0.35})`); gr.addColorStop(1,'rgba(0,0,0,0)');
+      g.fillStyle=gr; g.fillRect(cx-r,y-r,2*r,2*r); } };
+    const COLS=['70,110,255','120,72,230','40,170,210','190,80,170','90,140,255'];
+    for(let k=0;k<90;k++){ const u=rnd(); cloud(u*W, band(u)+(rnd()-0.5)*H*0.24, 50+rnd()*240, COLS[(rnd()*COLS.length)|0], 0.02+rnd()*0.06); }
+    for(let k=0;k<14000;k++){ const u=rnd(), b=rnd();
+      const y=rnd()<0.6 ? band(u)+(rnd()+rnd()+rnd()-1.5)*H*0.12 : rnd()*H; const s=b>0.97?2:1;
+      g.fillStyle=`rgba(${190+65*b|0},${200+55*b|0},255,${0.05+0.4*b*b*b})`; g.fillRect(u*W,y,s,s); }
+    g.globalCompositeOperation='source-over';
+  });
+  skyTex.anisotropy=renderer.capabilities.getMaxAnisotropy();
+
+  // 地球：深色海洋、海岸浅水、带斑驳纹理的陆地、冰盖、淡经纬线和一条金色赤道（对照目标高度用）
+  const earthTex=canvasTex(1024,512,(g,W,H)=>{
+    const oc=g.createLinearGradient(0,0,0,H); oc.addColorStop(0,'#0b2346'); oc.addColorStop(0.5,'#12407a'); oc.addColorStop(1,'#0a2143');
+    g.fillStyle=oc; g.fillRect(0,0,W,H);
+    const P=(lo,la)=>[(lo+180)/360*W,(90-la)/180*H];
+    const path=(pts)=>{ pts.forEach(([lo,la],k)=>{ const [x,y]=P(lo,la); k?g.lineTo(x,y):g.moveTo(x,y); }); g.closePath(); };
+    g.save(); g.filter='blur(7px)'; g.fillStyle='rgba(60,150,180,0.5)'; LAND.forEach(p=>{ g.beginPath(); path(p); g.fill(); }); g.restore();
+    g.save(); g.beginPath(); LAND.forEach(path); g.fillStyle='#4a7543'; g.fill(); g.clip();
+    for(let k=0;k<1400;k++){ const x=rnd()*W,y=rnd()*H,r=2+rnd()*12; g.fillStyle=rnd()<0.5?'rgba(140,120,78,0.22)':'rgba(24,52,28,0.22)'; g.beginPath(); g.arc(x,y,r,0,7); g.fill(); }
+    g.restore();
+    g.fillStyle='#dfe8ee'; ICE.forEach(p=>{ g.beginPath(); path(p); g.fill(); });
+    g.strokeStyle='rgba(255,255,255,0.07)'; g.lineWidth=1;
+    for(let lo=-180;lo<=180;lo+=30){ const x=(lo+180)/360*W; g.beginPath(); g.moveTo(x,0); g.lineTo(x,H); g.stroke(); }
+    for(let la=-60;la<=60;la+=30){ const y=(90-la)/180*H; g.beginPath(); g.moveTo(0,y); g.lineTo(W,y); g.stroke(); }
+    g.strokeStyle='rgba(255,214,140,0.55)'; g.lineWidth=2; g.beginPath(); g.moveTo(0,H/2); g.lineTo(W,H/2); g.stroke();
+  });
+  earthTex.anisotropy=renderer.capabilities.getMaxAnisotropy();
+  const cloudTex=canvasTex(1024,512,(g,W,H)=>{ g.filter='blur(5px)';
+    for(let k=0;k<280;k++){ g.fillStyle=`rgba(255,255,255,${0.1+rnd()*0.35})`; g.beginPath(); g.ellipse(rnd()*W,H*(0.12+0.76*rnd()),10+rnd()*60,4+rnd()*14,(rnd()-0.5)*0.6,0,7); g.fill(); }
+    g.filter='none'; },false);
+
+  // ---------- 深空背景：天空球 + 闪烁星空，整体极慢地转动 ----------
+  const space=new TH.Group(); scene.add(space);
+  const sky=new TH.Mesh(new TH.SphereGeometry(4200,64,32),new TH.MeshBasicMaterial({map:skyTex,side:TH.BackSide,fog:false,depthWrite:false}));
+  sky.rotation.z=0.35; space.add(sky);
+  const NSTAR=2600, sPos=new Float32Array(NSTAR*3), sSize=new Float32Array(NSTAR), sPh=new Float32Array(NSTAR), sCol=new Float32Array(NSTAR*3);
+  for(let k=0;k<NSTAR;k++){
+    const u=rnd()*2-1, a=rnd()*Math.PI*2, r=2400+rnd()*1200, q=Math.sqrt(1-u*u);
+    sPos.set([r*q*Math.cos(a),r*u,r*q*Math.sin(a)],k*3);
+    const b=Math.pow(rnd(),3); sSize[k]=1.1+b*3.2; sPh[k]=rnd()*6.283;
+    const t=rnd(), c=t<0.15?[1,0.82,0.66]:t<0.45?[0.72,0.84,1]:[1,1,1], br=0.55+0.45*b;
+    sCol.set([c[0]*br,c[1]*br,c[2]*br],k*3);
+  }
+  const starGeo=new TH.BufferGeometry();
+  starGeo.setAttribute('position',new TH.BufferAttribute(sPos,3)); starGeo.setAttribute('size',new TH.BufferAttribute(sSize,1));
+  starGeo.setAttribute('phase',new TH.BufferAttribute(sPh,1)); starGeo.setAttribute('col',new TH.BufferAttribute(sCol,3));
+  const starMat=new TH.ShaderMaterial({uniforms:{time:{value:0},pr:{value:renderer.getPixelRatio()}},
+    vertexShader:'attribute float size; attribute float phase; attribute vec3 col; uniform float time; uniform float pr; varying vec3 vC;'+
+      'void main(){ float tw=0.7+0.3*sin(time*(0.5+fract(phase)*1.8)+phase*5.0); vC=col*tw; vec4 mv=modelViewMatrix*vec4(position,1.0); gl_Position=projectionMatrix*mv; gl_PointSize=size*pr; }',
+    fragmentShader:'varying vec3 vC; void main(){ float r=length(gl_PointCoord-0.5); float a=smoothstep(0.5,0.0,r); gl_FragColor=vec4(vC*a,1.0); }',
+    transparent:true,depthWrite:false,blending:ADD});
+  const stars=new TH.Points(starGeo,starMat); stars.frustumCulled=false; space.add(stars);
+
+  // ---------- 反射环境：同一片星云 + 几块冷暖柔光板，让金属反射出深空的颜色 ----------
+  { const env=new TH.Scene();
+    env.add(new TH.Mesh(new TH.SphereGeometry(50,48,24),new TH.MeshBasicMaterial({map:skyTex,side:TH.BackSide})));
+    const panel=(w,h,x,y,z,r,g,b)=>{ const m=new TH.Mesh(new TH.PlaneGeometry(w,h),new TH.MeshBasicMaterial({color:new TH.Color(r,g,b),side:TH.DoubleSide})); m.position.set(x,y,z); m.lookAt(0,0,0); env.add(m); };
+    panel(30,12,-14,30,20, 2.4,2.6,3.0);   // 顶部冷白柔光板
+    panel(14,34,32,6,-22, 0.5,1.0,2.4);    // 背后蓝色轮廓光
+    panel(12,28,-30,4,-18, 1.0,0.6,2.0);   // 左后紫色轮廓光
+    panel(44,5,0,-22,24, 0.5,0.32,0.2);    // 下方暖色反光
+    const pm=new TH.PMREMGenerator(renderer); scene.environment=pm.fromScene(env,0.03).texture; pm.dispose(); }
+
+  // ---------- 灯光 ----------
+  scene.add(new TH.HemisphereLight(0x8ea4d8,0x05070c,0.22));
+  const spot=new TH.SpotLight(0xe4ecff,2.4,0,0.42,0.75,1);   // 顶部聚光灯，在展台上打出光池
+  spot.position.set(-60,360,140); spot.target.position.set(0,-80,0);
+  spot.castShadow=true; spot.shadow.mapSize.set(2048,2048); spot.shadow.bias=-0.0004; spot.shadow.normalBias=0.4;
+  spot.shadow.camera.near=100; spot.shadow.camera.far=900;
+  scene.add(spot,spot.target);
+  const rimA=new TH.DirectionalLight(0x5aa0ff,2.0); rimA.position.set(200,140,-260); scene.add(rimA);   // 背后蓝色轮廓光
+  const rimB=new TH.DirectionalLight(0x9a74ff,0.9); rimB.position.set(-240,80,-200); scene.add(rimB);  // 左后紫色轮廓光
+  const fill=new TH.DirectionalLight(0xbfd0ff,0.35); fill.position.set(220,60,240); scene.add(fill);
+  const coilLight=new TH.PointLight(0xff8a3d,0,240,1.4); coilLight.position.set(0,-6,0); scene.add(coilLight);
+
+  // ---------- 材质 ----------
+  const std=(o)=>new TH.MeshStandardMaterial(o), phys=(o)=>new TH.MeshPhysicalMaterial(o);
+  const M={
+    base:phys({color:0x07090d,roughness:0.22,metalness:0.25,clearcoat:1,clearcoatRoughness:0.12}),   // 钢琴黑底座
+    frame:std({color:0x7d889b,roughness:0.34,metalness:0.88}),                                       // 枪灰色阳极氧化铝
+    steel:std({color:0x7c8696,roughness:0.28,metalness:0.92}),
+    pcb:std({color:0x0e3a27,roughness:0.55,metalness:0.1}),
+    chip:std({color:0x0b0c0f,roughness:0.45,metalness:0.1}),
+    pin:std({color:0xb8bec8,roughness:0.3,metalness:1}),
+    sink:std({color:0x14181f,roughness:0.42,metalness:0.7}),
+    brass:std({color:0xc9a13e,roughness:0.28,metalness:1}),
+    film:std({color:0xc9a23a,roughness:0.5}),
+    resistor:std({color:0xcdb994,roughness:0.6}),
+    wireR:std({color:0x8f1f1a,roughness:0.45}),
+    wireK:std({color:0x101216,roughness:0.45}),
+    pot:std({color:0x1f4f9c,roughness:0.5}),
+    knob:std({color:0xdcdfe4,roughness:0.4})
+  };
+  const coilMat=std({map:coilTex,metalness:0.85,roughness:0.32,emissive:new TH.Color(0xff6a1a),emissiveIntensity:0});
+  const diodeMat=std({color:0x17191d,roughness:0.4,emissive:new TH.Color(0xff7a1a),emissiveIntensity:0});
+  const canMat=std({color:0xc9cdd3,roughness:0.26,metalness:0.95});
+
+  const add=(geo,mat,x,y,z,parent)=>{ const m=new TH.Mesh(geo,mat); m.position.set(x,y,z); m.castShadow=true; m.receiveShadow=true; (parent||scene).add(m); return m; };
+  const glowSprite=(color,size,opacity)=>{ const s=new TH.Sprite(new TH.SpriteMaterial({map:softTex,color,transparent:true,opacity,blending:ADD,depthWrite:false,fog:false})); s.scale.setScalar(size); scene.add(s); return s; };
+  const roundedSlab=(w,d,h,r)=>{ const s=new TH.Shape(), x=-w/2, y=-d/2;
+    s.moveTo(x+r,y); s.lineTo(x+w-r,y); s.quadraticCurveTo(x+w,y,x+w,y+r); s.lineTo(x+w,y+d-r); s.quadraticCurveTo(x+w,y+d,x+w-r,y+d);
+    s.lineTo(x+r,y+d); s.quadraticCurveTo(x,y+d,x,y+d-r); s.lineTo(x,y+r); s.quadraticCurveTo(x,y,x+r,y);
+    const g=new TH.ExtrudeGeometry(s,{depth:h,bevelEnabled:true,bevelThickness:1.5,bevelSize:1.5,bevelSegments:3,curveSegments:10}); g.rotateX(-Math.PI/2); return g; };
+
+  // ---------- 悬浮展台：黑色亮面圆台 + 一圈青色边光 + 台下的微光 ----------
+  const ped=new TH.Mesh(new TH.CylinderGeometry(150,144,10,128),phys({color:0x05070a,roughness:0.18,metalness:0.35,clearcoat:1,clearcoatRoughness:0.1}));
+  ped.position.y=PED_TOP-5; ped.receiveShadow=true; scene.add(ped);
+  const pedRing=new TH.Mesh(new TH.TorusGeometry(150,0.7,10,192),new TH.MeshBasicMaterial({color:0x58c8ff,transparent:true,opacity:0.7,blending:ADD,fog:false}));
+  pedRing.rotation.x=Math.PI/2; pedRing.position.y=PED_TOP; scene.add(pedRing);
+  const under=new TH.Mesh(new TH.PlaneGeometry(520,520),new TH.MeshBasicMaterial({map:softTex,color:0x2a7fff,transparent:true,opacity:0.32,blending:ADD,depthWrite:false,fog:false}));
+  under.rotation.x=-Math.PI/2; under.position.y=PED_TOP-16; scene.add(under);
+
+  // ---------- 底座、立柱、横臂、电磁铁 ----------
+  add(roundedSlab(190,130,12,14),M.base,0,BASE_TOP-13.5,0);
+  // 支架：立柱和横臂用一个倒 L 形轮廓整体挤出，外拐角做圆角
+  { const s=new TH.Shape();
+    s.moveTo(-10,44); s.lineTo(66,44); s.quadraticCurveTo(70,44,70,40); s.lineTo(70,BASE_TOP);
+    s.lineTo(86,BASE_TOP); s.lineTo(86,46); s.quadraticCurveTo(86,56,76,56); s.lineTo(-10,56); s.lineTo(-10,44);
+    const g=new TH.ExtrudeGeometry(s,{depth:14,bevelEnabled:true,bevelThickness:1,bevelSize:1,bevelSegments:2,curveSegments:12});
+    g.translate(0,0,-7); add(g,M.frame,0,0,0); }
+  add(new TH.CylinderGeometry(7,7,8,24),M.steel,0,40,0);
+  add(new TH.CylinderGeometry(25,25,6,64),M.steel,0,33,0);
+  add(new TH.CylinderGeometry(22,22,24,64),coilMat,0,18,0);
+  add(new TH.CylinderGeometry(25,25,4,64),M.steel,0,4,0);
+  add(new TH.CylinderGeometry(8,8,2,32),M.steel,0,1,0);
+  add(new TH.BoxGeometry(5,1.6,3.5),M.chip,0,-0.8,0);
+  const halo=glowSprite(0xff8a3d,130,0); halo.position.set(0,16,0);        // 线圈通电时的暖光晕
+  const poleGlow=glowSprite(0x5ab8ff,34,0); poleGlow.position.set(0,-2,0); // 极面下方的磁场微光
+
+  // ---------- 地球仪：表面、云层、边缘辉光、外层大气；顶部嵌小磁铁，南极可挂重物 ----------
+  const G=new TH.Group(); scene.add(G);
+  const globe=new TH.Mesh(new TH.SphereGeometry(R,96,64),phys({map:earthTex,roughness:0.5,metalness:0,clearcoat:0.45,clearcoatRoughness:0.25}));
+  globe.castShadow=true; globe.receiveShadow=true; G.add(globe);
+  const clouds=new TH.Mesh(new TH.SphereGeometry(R*1.012,96,64),std({map:cloudTex,transparent:true,opacity:0.8,depthWrite:false,roughness:1}));
+  G.add(clouds);
+  const shellVS='varying vec3 vN; varying vec3 vV; void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0); vN=normalize(normalMatrix*normal); vV=normalize(-mv.xyz); gl_Position=projectionMatrix*mv; }';
+  const rimGlow=new TH.Mesh(new TH.SphereGeometry(R*1.016,64,48),new TH.ShaderMaterial({uniforms:{c:{value:new TH.Color(0x5fb4ff)}},vertexShader:shellVS,
+    fragmentShader:'uniform vec3 c; varying vec3 vN; varying vec3 vV; void main(){ float f=pow(1.0-max(dot(normalize(vN),normalize(vV)),0.0),3.5)*0.5; gl_FragColor=vec4(c*f,1.0); }',
+    transparent:true,depthWrite:false,blending:ADD}));
+  G.add(rimGlow);
+  const atmo=new TH.Mesh(new TH.SphereGeometry(R*1.12,64,48),new TH.ShaderMaterial({uniforms:{c:{value:new TH.Color(0x3d8cff)}},vertexShader:shellVS,
+    fragmentShader:'uniform vec3 c; varying vec3 vN; varying vec3 vV; void main(){ float f=pow(max(0.62-dot(normalize(vN),normalize(vV)),0.0),3.0)*0.9; gl_FragColor=vec4(c*f,1.0); }',
+    side:TH.BackSide,transparent:true,depthWrite:false,blending:ADD}));
+  G.add(atmo);
+  const cap=new TH.Mesh(new TH.CylinderGeometry(6,6,1.2,24),M.steel); cap.position.y=R-0.4; G.add(cap);
+  const weight=new TH.Group(); G.add(weight);
+  add(new TH.CylinderGeometry(7,7,6,32),M.brass,0,-R-3.6,0,weight);
+  add(new TH.CylinderGeometry(1.4,1.4,2,12),M.brass,0,-R-0.4,0,weight);
+  const blob=new TH.Mesh(new TH.PlaneGeometry(1,1),new TH.MeshBasicMaterial({map:blobTex,transparent:true,depthWrite:false}));
+  blob.rotation.x=-Math.PI/2; blob.position.set(0,BASE_TOP+0.2,0); scene.add(blob);
+
+  // 目标高度：青绿色虚线圆环，稳定时正好对齐地球仪的金色赤道
+  const ringPts=[]; for(let k=0;k<=160;k++){ const a=k/160*Math.PI*2; ringPts.push(V(38*Math.cos(a),-(10+R),38*Math.sin(a))); }
+  const ring=new TH.Line(new TH.BufferGeometry().setFromPoints(ringPts),new TH.LineDashedMaterial({color:0x3be0a0,dashSize:3,gapSize:2.4,transparent:true,opacity:0.9,blending:ADD,fog:false}));
+  ring.computeLineDistances(); scene.add(ring);
+
+  // 磁感线：内圈从极面直达地球仪顶部，外圈从线圈顶部绕到外侧再落到地球仪肩部；粒子沿线流动
+  const NL=8, NP=32, NQ=7, NC=NL*2;
+  const fieldMat=new TH.LineBasicMaterial({color:0x4aa8ff,transparent:true,opacity:0.4,depthWrite:false,blending:ADD,fog:false});
+  const lines=[]; for(let k=0;k<NC;k++){ const g=new TH.BufferGeometry(); g.setAttribute('position',new TH.BufferAttribute(new Float32Array(NP*3),3)); const l=new TH.Line(g,fieldMat); l.frustumCulled=false; scene.add(l); lines.push(l); }
+  const partGeo=new TH.BufferGeometry(); partGeo.setAttribute('position',new TH.BufferAttribute(new Float32Array(NC*NQ*3),3));
+  const partMat=new TH.PointsMaterial({color:0xa8dcff,size:3.4,map:dotTex,transparent:true,depthWrite:false,blending:ADD,fog:false});
+  const parts=new TH.Points(partGeo,partMat); parts.frustumCulled=false; scene.add(parts);
+  const bez=(P,t,o,i)=>{ const u=1-t, w0=u*u*u, w1=3*u*u*t, w2=3*u*t*t, w3=t*t*t;
+    for(let a=0;a<3;a++) o[i+a]=w0*P[0][a]+w1*P[1][a]+w2*P[2][a]+w3*P[3][a]; };
+  const curve=(k,cy)=>{ const outer=k>=NL, j=k%NL, ph=j/NL*Math.PI*2+(outer?0.2+Math.PI/NL:0.2), cs=Math.cos(ph), sn=Math.sin(ph);
+    const at=(r,y)=>[r*cs,y,r*sn];
+    if(!outer){ const th=0.55, end=at(R*Math.sin(th),cy+R*Math.cos(th)), a=at(5,-0.4);
+      return [a, at(11,a[1]+(end[1]-a[1])*0.35), at(17,a[1]+(end[1]-a[1])*0.75), end]; }
+    const th=1.15, end=at(R*Math.sin(th)+0.3,cy+R*Math.cos(th));
+    return [at(24,36.5), at(52,40), at(56,cy+12), end]; };
+
+  // 推力箭头
+  const arrow=new TH.ArrowHelper(V(0,-1,0),V(0,0,0),26,0xdfe8ff,8,5); arrow.visible=false; scene.add(arrow);
+
+  // ---------- 底座上的电路板：4 片运放、积分/微分电容、设定电位器、采样电阻、续流二极管 ----------
+  const pcb=new TH.Group(); pcb.position.set(-52,BASE_TOP,30); scene.add(pcb);
+  add(new TH.BoxGeometry(68,1.6,46),M.pcb,0,0.8,0,pcb);
+  for(const x of [-24,-10,4,18]){
+    add(new TH.BoxGeometry(10,3.6,6.6),M.chip,x,3.4,-11,pcb);
+    for(let q=0;q<4;q++) for(const sz of [-1,1]) add(new TH.BoxGeometry(0.7,1.8,1.2),M.pin,x-3.8+q*2.54,1.9,-11+sz*3.9,pcb);
+  }
+  add(new TH.BoxGeometry(7,6,4),M.film,-24,4.6,4,pcb); add(new TH.BoxGeometry(7,6,4),M.film,-12,4.6,4,pcb);
+  add(new TH.CylinderGeometry(2.2,2.2,12,20),M.resistor,10,3.8,12,pcb).rotation.z=Math.PI/2;
+  const dio=add(new TH.CylinderGeometry(1.9,1.9,8,20),diodeMat,-8,3.5,15,pcb); dio.rotation.z=Math.PI/2;
+  const band=add(new TH.CylinderGeometry(1.95,1.95,1.3,20),M.pin,-11,3.5,15,pcb); band.rotation.z=Math.PI/2;
+  add(new TH.BoxGeometry(9,6,9),M.pot,-26,4.6,15,pcb); add(new TH.CylinderGeometry(3,3,4,20),M.knob,-26,9.6,15,pcb);
+  const glow=glowSprite(0xff8a2a,18,0); glow.position.set(-60,BASE_TOP+3.5,45);
+
+  // 散热器 + TO-3 封装的功率三极管 2N3055
+  const hs=new TH.Group(); hs.position.set(42,BASE_TOP,34); scene.add(hs);
+  add(new TH.BoxGeometry(36,3,32),M.sink,0,1.5,0,hs);
+  for(let q=0;q<8;q++) add(new TH.BoxGeometry(1.6,16,13),M.sink,-15.4+q*4.4,11,8.5,hs);
+  add(new TH.CylinderGeometry(12,12,1.4,40),M.steel,0,3.7,-7,hs).scale.set(1.4,1,0.72);
+  add(new TH.CylinderGeometry(8.5,8.5,7.5,40),canMat,0,8.1,-7,hs);
+  const canWorld=V(42,BASE_TOP+12,27);
+
+  // 线圈引线：沿横臂和立柱走到三极管
+  const wire=(pts,mat)=>{ const c=new TH.CatmullRomCurve3(pts.map(p=>V(p[0],p[1],p[2]))); add(new TH.TubeGeometry(c,90,0.9,8,false),mat,0,0,0); };
+  wire([[19,20,8],[28,36,10],[50,38,10],[72,34,10],[72,-60,10],[71,-100,12],[60,-103.8,24],[46,-103.8,28]],M.wireR);
+  wire([[18,12,10],[27,32,12.5],[50,35,12.5],[75,30,12.5],[75,-60,12.5],[74,-100,14],[52,-103.8,30],[36,-103.8,27]],M.wireK);
+
+  // 击穿时的火花和烟
+  const NS=60, spPos=new Float32Array(NS*3).fill(9999), spVel=new Float32Array(NS*3), spLife=new Float32Array(NS);
+  const spGeo=new TH.BufferGeometry(); spGeo.setAttribute('position',new TH.BufferAttribute(spPos,3));
+  const sparks=new TH.Points(spGeo,new TH.PointsMaterial({color:0xffb347,size:3,map:dotTex,transparent:true,depthWrite:false,blending:ADD,fog:false}));
+  sparks.frustumCulled=false; scene.add(sparks);
+  const flash=glowSprite(0xff7a2a,90,0); flash.position.copy(canWorld);
+  const smoke=[]; for(let q=0;q<10;q++){ const sp=new TH.Sprite(new TH.SpriteMaterial({map:dotTex,color:0x55606e,transparent:true,opacity:0,depthWrite:false})); sp.visible=false; scene.add(sp); smoke.push({sp,life:0,delay:0}); }
+  let flashT=0;
+  function burst(){
+    for(let q=0;q<NS;q++){ spPos.set([canWorld.x,canWorld.y,canWorld.z],q*3); spVel.set([(Math.random()-0.5)*180,60+Math.random()*170,(Math.random()-0.5)*180],q*3); spLife[q]=0.4+Math.random()*0.6; }
+    smoke.forEach((m,q)=>{ m.life=3; m.delay=q*0.15; m.sp.position.copy(canWorld); m.sp.visible=true; });
+    flashT=0.5;
+  }
+
+  // ---------- 标注 ----------
+  const LAB=[
+    {id:'coil',cls:'left',text:'电磁铁线圈',at:()=>[-23,20,0]},
+    {id:'hall',cls:'right',text:'霍尔传感器',at:()=>[3,-1,2]},
+    {id:'target',cls:'left',text:'目标高度',at:()=>[-38,-(10+R),0]},
+    {id:'tr',cls:'up',text:'功率三极管',at:()=>[42,BASE_TOP+13,27]},
+    {id:'dio',cls:'left',text:'续流二极管',at:()=>[-62,BASE_TOP+4,45]},
+    {id:'op',cls:'up',text:'运放 PID 电路',at:()=>[-45,BASE_TOP+7,19]},
+    {id:'rs',cls:'right',text:'采样电阻 1 Ω',at:()=>[-36,BASE_TOP+4,42]}
+  ];
+  const labs={}; for(const L of LAB){ const el=document.createElement('div'); el.className='l3 '+L.cls; el.innerHTML='<i></i><span></span>'; el.lastChild.textContent=L.text; labelHost.appendChild(el); labs[L.id]={...L,el,span:el.lastChild}; }
+  let labelsOn=true;
+
+  // ---------- 视角：拖动旋转、预设视角平滑过渡、空闲时镜头缓慢漂移 ----------
+  const PRESET={ angle:{az:0.62,el:0.24,dist:470,tx:0,ty:-42,tz:10}, front:{az:0,el:0.08,dist:450,tx:0,ty:-40,tz:0}, board:{az:0.18,el:0.72,dist:260,tx:-5,ty:-100,tz:30} };
+  const view={...PRESET.angle}, goal={...PRESET.angle};
+  let drag=null, lastTouch=performance.now();
+  cv.addEventListener('pointerdown',e=>{ drag={x:e.clientX,y:e.clientY}; lastTouch=performance.now(); cv.setPointerCapture(e.pointerId); cv.focus({preventScroll:true}); });
+  cv.addEventListener('pointermove',e=>{ if(!drag) return; const dx=e.clientX-drag.x, dy=e.clientY-drag.y; drag.x=e.clientX; drag.y=e.clientY; lastTouch=performance.now();
+    goal.az-=dx*0.008; goal.el=clamp(goal.el+dy*0.006,-0.05,1.25); view.az=goal.az; view.el=goal.el; });
+  const endDrag=()=>{ drag=null; }; cv.addEventListener('pointerup',endDrag); cv.addEventListener('pointercancel',endDrag);
+  cv.addEventListener('wheel',e=>{ if(document.activeElement!==cv) return; e.preventDefault(); lastTouch=performance.now(); goal.dist=clamp(goal.dist*Math.exp(e.deltaY*0.001),160,800); },{passive:false});
+  cv.addEventListener('dblclick',()=>setView('angle'));
+  function setView(name){ Object.assign(goal,PRESET[name]); lastTouch=performance.now();
+    document.querySelectorAll('#views [data-view]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===name?'true':'false')); }
+  document.querySelectorAll('#views [data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
+
+  // 面板挡住的区域：用视口偏移把模型移到剩下空间的正中
+  const ins={l:0,r:0,t:0,b:0}, insC={l:0,r:0,t:0,b:0};
+  function setInsets(o){ Object.assign(ins,o); }
+
+  let W=1,H=1;
+  new ResizeObserver(()=>{ const w=host.clientWidth, h=host.clientHeight; if(!w||!h) return; W=w; H=h; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); }).observe(host);
+
+  let prevDamaged=false, flow=0, lastLab=0;
+  const tmp=new TH.Vector3();
+  function render(rdt,active,now){
+    const s=sim.s, o=sim.out, p=PARAMS.plant, d=PARAMS.driver;
+    // 显示位置：目标附近把间隙变化放大约 3 倍，远处恢复 1:1，保证不会穿过电磁铁或底座
+    const dd=s.x*1000-p.x0_m*1000;
+    const disp=clamp(p.x0_m*1000+dd*(1+2*Math.exp(-dd*dd/6.25)), p.x_contact_m*1000, p.x_floor_m*1000-(sim.massRatio>0?6.6:0));
+    const cy=-(disp+R);
+    G.position.y=cy; globe.rotation.y=rot; clouds.rotation.y=rot*1.25+0.6; weight.visible=sim.massRatio>0;
+    const lift=(cy-R)-BASE_TOP, near=clamp(1-lift/70,0,1);
+    blob.scale.setScalar(44+46*(1-near)); blob.material.opacity=0.1+0.45*near;
+    space.rotation.y+=rdt*0.004; starMat.uniforms.time.value=now/1000;
+
+    // 线圈发光，亮度随电流
+    const lvl=clamp(s.i/1.1,0,1);
+    coilMat.emissiveIntensity=0.05+1.2*lvl*lvl; coilLight.intensity=2.2*lvl; halo.material.opacity=0.34*lvl*lvl;
+
+    // 磁感线和粒子，浓淡随磁力
+    const show=disp>2.6 && s.i>0.01;
+    const st=Math.min(1,o.F/(p.m_kg*(1+sim.massRatio)*p.g_m_per_s2));
+    fieldMat.opacity=0.12+0.5*st; partMat.opacity=0.25+0.75*st; poleGlow.material.opacity=show?0.45*st:0;
+    if(active) flow+=rdt*(0.25+0.6*clamp(s.i/0.6,0,2));
+    const pp=partGeo.attributes.position.array;
+    for(let k=0;k<NC;k++){
+      const P=curve(k,cy), arr=lines[k].geometry.attributes.position.array;
+      for(let j=0;j<NP;j++) bez(P,j/(NP-1),arr,j*3);
+      lines[k].geometry.attributes.position.needsUpdate=true; lines[k].visible=show;
+      for(let q=0;q<NQ;q++){ const t=(flow+q/NQ+k*0.37)%1; bez(P,t,pp,(k*NQ+q)*3); }
+    }
+    partGeo.attributes.position.needsUpdate=true; parts.visible=show;
+
+    // 续流二极管导通时发光；拆掉后不显示
+    const diodeOn=sim.diode && o.Vc<0 && s.i>1e-4;
+    dio.visible=band.visible=sim.diode;
+    diodeMat.emissiveIntensity=diodeOn?2:0; glow.material.opacity=diodeOn?0.55+0.4*clamp(s.i/0.6,0,1):0;
+    const Pt=diodeOn?0:Math.max(0,(d.Vs_V-o.Vc)*s.i);
+
+    // 三极管击穿：闪光、火花、烟、外壳烧黑
+    if(sim.damaged&&!prevDamaged){ burst(); canMat.color.set(0x2a2522); canMat.roughness=0.9; canMat.metalness=0.2; }
+    if(!sim.damaged&&prevDamaged){ canMat.color.set(0xc9cdd3); canMat.roughness=0.26; canMat.metalness=0.95; }
+    prevDamaged=sim.damaged;
+    flashT=Math.max(0,flashT-rdt); flash.material.opacity=flashT>0?Math.min(1,flashT*3):0;
+    for(let q=0;q<NS;q++){ if(spLife[q]<=0) continue; spLife[q]-=rdt; spVel[q*3+1]-=600*rdt;
+      spPos[q*3]+=spVel[q*3]*rdt; spPos[q*3+1]+=spVel[q*3+1]*rdt; spPos[q*3+2]+=spVel[q*3+2]*rdt; if(spLife[q]<=0) spPos[q*3+1]=9999; }
+    spGeo.attributes.position.needsUpdate=true;
+    smoke.forEach((m,q)=>{ if(m.life<=0) return; if(m.delay>0){ m.delay-=rdt; return; } m.life-=rdt; const a=1-m.life/3;
+      m.sp.position.set(canWorld.x+Math.sin(a*6+q)*4, canWorld.y+4+a*45, canWorld.z); m.sp.scale.setScalar(6+a*22); m.sp.material.opacity=0.4*(1-a); if(m.life<=0) m.sp.visible=false; });
+
+    // 推力箭头
+    arrow.visible=sim.t<sim.pushUntil+0.06; arrow.position.set(R+14,cy+34,0);
+
+    // 相机：平滑跟随目标视角；没人操作 5 秒后开始缓慢漂移
+    const k=1-Math.exp(-rdt*7); for(const key in view) view[key]+=(goal[key]-view[key])*k;
+    for(const key in ins) insC[key]+=(ins[key]-insC[key])*k;
+    const idle=clamp((now-lastTouch-5000)/5000,0,1);
+    const az=view.az+idle*0.1*Math.sin(now/7000), el=view.el+idle*0.025*Math.sin(now/9000), ce=Math.cos(el);
+    // 被面板挡住得越多，镜头退得越远，保证模型完整落在空白区域里
+    const freeH=Math.max(0.45,(H-insC.t-insC.b)/H), freeW=Math.max(0.45,(W-insC.l-insC.r)/W);
+    const dist=view.dist/Math.min(freeH,freeW*W/H/1.25,1);
+    cam.position.set(view.tx+dist*ce*Math.sin(az), view.ty+dist*Math.sin(el), view.tz+dist*ce*Math.cos(az));
+    cam.lookAt(view.tx,view.ty,view.tz);
+    cam.setViewOffset(W,H,(insC.r-insC.l)/2,(insC.b-insC.t)/2,W,H);
+    renderer.render(scene,cam);
+
+    // 标注跟随三维位置
+    if(!labelsOn) return;
+    for(const id in labs){ const L=labs[id], [x,y,z]=L.at(); tmp.set(x,y,z).project(cam);
+      if(tmp.z>1||Math.abs(tmp.x)>1.05||Math.abs(tmp.y)>1.05){ L.el.style.visibility='hidden'; continue; }
+      L.el.style.visibility='visible'; L.el.style.transform=`translate(${((tmp.x+1)/2*W).toFixed(1)}px,${((1-tmp.y)/2*H).toFixed(1)}px)`; }
+    if(now-lastLab>120){ lastLab=now;
+      labs.coil.span.textContent=`电磁铁线圈 · ${s.i.toFixed(2)} A`;
+      labs.tr.span.textContent=sim.damaged?'功率三极管 · 已击穿':`功率三极管 2N3055 · ${Pt.toFixed(1)} W`;
+      labs.dio.span.textContent=!sim.diode?'续流二极管 · 已拆除':(diodeOn?'续流二极管 · 导通':'续流二极管'); }
+  }
+  function setLabels(on){ labelsOn=on; labelHost.classList.toggle('off',!on); }
+  return {render,setLabels,setInsets,renderer,scene,cam};
+}
+
+/* ---------- 主循环 ---------- */
+let fpsCount=0, fpsT0=0;
+function frame(now){
+  // 上限放宽到 0.25 s：电脑卡顿时画面不连贯，但仿真时间照常推进
+  const rdt=Math.min(0.25,(now-lastNow)/1000); lastNow=now;
+  fpsCount++; if(now-fpsT0>2000){ const fps=fpsCount*1000/(now-fpsT0); const h=$('#fps-hint');
+    h.hidden=!(use3d&&fps<12); h.textContent=`画面卡顿（约 ${Math.max(1,Math.round(fps))} 帧/秒），可以切换到平面`;
+    if(use3d&&fps<20) document.body.classList.add('lowfx');   // 电脑带不动时关掉面板的毛玻璃效果
+    fpsCount=0; fpsT0=now; }
+  if(!paused){
+    const h=1e-4, n=Math.round(rdt*speed/h);
+    for(let k=0;k<n;k++){
+      sim.noiseF += -sim.noiseF*h/NOISE_TAU + NOISE_SIGMA*Math.sqrt(2*h/NOISE_TAU)*randn();
+      sim.step(h);
+      if(sim.t>=nextSample){ record(); nextSample=sim.t+0.001; }
+    }
+    rot+=rdt*0.5;
+    phase+=rdt*(8+30*clamp(sim.s.i/0.6,0,2));
+  }
+  if(use3d) stage3d.render(rdt,!paused,now); else drawStage();
+  drawScope(); updateUi(now);
+  requestAnimationFrame(frame);
+}
+
+function onTheme(){ readTokens(); drawMap(); }
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',onTheme);
+new MutationObserver(onTheme).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+
+// 能显示三维就用三维舞台，否则退回平面舞台；演示者也可以手动切换，选择会被记住
+stage3d=createStage3D($('#stage3d'),$('#labels3d'));
+let use3d=false;
+function setMode(m){
+  use3d = m==='3d' && !!stage3d;
+  $('#stage3d').hidden=!use3d; stageCv.hidden=use3d;
+  document.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',(b.dataset.mode===(use3d?'3d':'2d'))?'true':'false'));
+  if(!use3d){ fit(); $('#fps-hint').hidden=true; }
+  try{ localStorage.setItem('maglev-mode',use3d?'3d':'2d'); }catch(err){}
+}
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>setMode(b.dataset.mode));
+if(stage3d){
+  $('#b-labels').onclick=()=>{ const on=$('#b-labels').getAttribute('aria-pressed')!=='true'; $('#b-labels').setAttribute('aria-pressed',on?'true':'false'); stage3d.setLabels(on); };
+} else { document.querySelector('[data-mode="3d"]').disabled=true; }
+let savedMode=null; try{ savedMode=localStorage.getItem('maglev-mode'); }catch(err){}
+setMode(savedMode==='2d'?'2d':'3d');
+if(matchMedia('(max-width:1199px)').matches) setPanel(false);   // 屏幕不够宽时默认收起参数面板，把空间留给模型
+
+// 电路对照的三档开关；默认"不对照"，上次的选择会被记住
+document.querySelectorAll('#circ-mode [data-circ]').forEach(b=>b.onclick=()=>setCircMode(b.dataset.circ));
+$('#b-redo').onclick=()=>redoCompare();
+{ let saved='off'; try{ saved=localStorage.getItem('maglev-circuit')||'off'; }catch(err){}
+  if(saved==='stored'&&!CIRC) saved='off';
+  setCircMode(['off','stored','live'].includes(saved)?saved:'off'); }
+
+syncKnobs(); fit(); syncButtons(); setSpeed(0.25);
+requestAnimationFrame((t)=>{ lastNow=t; requestAnimationFrame(frame); });
+</script>
